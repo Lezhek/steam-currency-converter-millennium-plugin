@@ -526,6 +526,11 @@ const resetDynamicBundlePrice = (element: HTMLElement) => {
   });
 };
 
+const shouldUseDiscountedDynamicBundleStyle = (priceContainer: HTMLElement): boolean => {
+  const discount = Number(priceContainer.dataset?.discount || priceContainer.getAttribute("data-discount") || 0);
+  return discount > 0 || priceContainer.querySelector(".discount_pct") !== null;
+};
+
 const injectDynamicBundlePrice = (element: HTMLElement) => {
   if (element.classList.contains("steam-rub-dynamic-bundle-done")) return;
   if (!currency || !valute || !valuteSign || valute === getTargetCurrency()) return;
@@ -542,6 +547,9 @@ const injectDynamicBundlePrice = (element: HTMLElement) => {
 
   const span = document.createElement("span");
   span.className = "steam-rub-price steam-rub-dynamic-bundle-price";
+  if (shouldUseDiscountedDynamicBundleStyle(priceContainer)) {
+    span.classList.add("is-discounted");
+  }
   span.textContent = `≈${formatted}`;
   const priceLine = Array.from(element.children).find(child => {
     const childElement = child as HTMLElement;
@@ -1218,6 +1226,9 @@ export default function WebkitMain() {
       color: #c6d4df !important;
       font-size: 13px !important;
       line-height: 16px !important;
+    }
+    .steam-rub-dynamic-bundle-price.is-discounted {
+      color: inherit !important;
     }
     .dynamic_bundle_description .game_purchase_action,
     .dynamic_bundle_description .game_purchase_action_bg,
