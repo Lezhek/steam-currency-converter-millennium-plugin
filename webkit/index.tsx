@@ -141,22 +141,7 @@ const formattedCurrencyReplacements: Record<string, Array<[RegExp, string]>> = {
   ],
 };
 
-const wholeNumberDisplayCurrencies = new Set([
-  "CLP",
-  "COP",
-  "CRC",
-  "IDR",
-  "JPY",
-  "KRW",
-  "KZT",
-  "RUB",
-  "TWD",
-  "VND",
-]);
-
-const getDisplayFractionDigits = (currencyCode: string): number => {
-  if (wholeNumberDisplayCurrencies.has(currencyCode)) return 0;
-
+const getOfficialFractionDigits = (currencyCode: string): number => {
   try {
     return new Intl.NumberFormat(undefined, {
       style: "currency",
@@ -200,6 +185,33 @@ const getRateForCurrency = (currencyCode: string, source: RateSource = getActive
   }
 
   return getFreedomBankRateForCurrency(currencyCode);
+};
+
+const wholeNumberDisplayUsdThreshold = 10;
+let displayFractionDigitsCacheKey = "";
+let displayFractionDigitsCacheValue: number | null = null;
+
+const getDisplayFractionDigits = (currencyCode: string): number => {
+  const normalizedCurrencyCode = currencyCode.toString().trim().toUpperCase();
+  const officialFractionDigits = getOfficialFractionDigits(normalizedCurrencyCode);
+  const configuredSource = getActiveRateSource();
+  const fallbackSource: RateSource | null = configuredSource === "freedom" ? "exchange_api" : null;
+  const usdRate = getRateForCurrency("USD", configuredSource) ?? (fallbackSource ? getRateForCurrency("USD", fallbackSource) : null);
+  const targetRate = getRateForCurrency(normalizedCurrencyCode, configuredSource) ?? (fallbackSource ? getRateForCurrency(normalizedCurrencyCode, fallbackSource) : null);
+  const cacheKey = `${configuredSource}:${normalizedCurrencyCode}:${usdRate ?? "missing"}:${targetRate ?? "missing"}:${officialFractionDigits}`;
+
+  if (displayFractionDigitsCacheKey === cacheKey && displayFractionDigitsCacheValue !== null) {
+    return displayFractionDigitsCacheValue;
+  }
+
+  let fractionDigits = officialFractionDigits;
+  if (usdRate && targetRate && targetRate / usdRate >= wholeNumberDisplayUsdThreshold) {
+    fractionDigits = 0;
+  }
+
+  displayFractionDigitsCacheKey = cacheKey;
+  displayFractionDigitsCacheValue = fractionDigits;
+  return fractionDigits;
 };
 
 const getConversionRates = (): { sourceRate: number; targetRate: number } | null => {
