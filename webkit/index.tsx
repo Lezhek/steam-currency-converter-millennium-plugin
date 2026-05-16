@@ -2001,9 +2001,9 @@ export default function WebkitMain() {
     }
     .game_area_purchase_game_dropdown_menu_item_text .steam-rub-dropdown-price {
       margin-left: 6px !important;
-      color: #8f98a0 !important;
-      font-size: 11px !important;
-      font-weight: normal !important;
+      color: inherit !important;
+      font-size: inherit !important;
+      font-weight: inherit !important;
       line-height: inherit !important;
     }
     .game_area_purchase_game_dropdown_selection .steam-rub-dropdown-price {
