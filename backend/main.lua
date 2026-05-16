@@ -54,6 +54,8 @@ local cached_rates = {
     exchange_api = nil,
 }
 
+local session_source_currency = nil
+
 local function get_plugin_dir()
     local src = debug.getinfo(1, "S").source or ""
     src = src:gsub("^@", "")
@@ -227,6 +229,63 @@ local function is_supported_target(source, target)
     return get_supported_target_set(source)[target] == true
 end
 
+local function normalize_currency_code(code)
+    code = tostring(code or ""):upper():gsub("%s+", "")
+    if code == "" then
+        return nil
+    end
+
+    return code
+end
+
+local function is_supported_source_currency(code)
+    return FIAT_CURRENCIES[code] == true
+end
+
+local function normalize_source_currency_payload(payload)
+    if type(payload) == "string" then
+        local ok, parsed = pcall(json.decode, payload)
+        if ok and type(parsed) == "table" then
+            payload = parsed
+        else
+            payload = { currency = payload }
+        end
+    end
+
+    if type(payload) ~= "table" then
+        return nil
+    end
+
+    if payload[1] ~= nil then
+        if type(payload[1]) == "table" then
+            payload = payload[1]
+        else
+            payload = { currency = payload[1] }
+        end
+    end
+
+    if type(payload.currency) == "string" then
+        local ok, parsed = pcall(json.decode, payload.currency)
+        if ok and type(parsed) == "table" then
+            payload = parsed
+        end
+    end
+
+    local code = normalize_currency_code(payload.currency or payload.sourceCurrency or payload.code)
+    if not code or not is_supported_source_currency(code) then
+        return nil
+    end
+
+    return {
+        currency = code,
+        sign = tostring(payload.sign or ""),
+        detector = tostring(payload.detector or "unknown"),
+        confidence = tostring(payload.confidence or "unknown"),
+        url = tostring(payload.url or ""),
+        timestamp = utils.time_ms(),
+    }
+end
+
 -- Fetch rates from external APIs
 function FetchRates()
     logger:info("Updating exchange rates...")
@@ -245,6 +304,41 @@ function GetCachedRates()
 
     cached_rates.settings = load_settings()
     return json.encode(cached_rates)
+end
+
+function GetSessionSourceCurrency()
+    return json.encode({
+        success = true,
+        data = session_source_currency,
+    })
+end
+
+function SetSessionSourceCurrencyOnce(payload)
+    if session_source_currency ~= nil then
+        return json.encode({
+            success = true,
+            locked = false,
+            data = session_source_currency,
+        })
+    end
+
+    local normalized = normalize_source_currency_payload(payload)
+    if not normalized then
+        return json.encode({
+            success = false,
+            error = "Invalid source currency payload",
+            data = session_source_currency,
+        })
+    end
+
+    session_source_currency = normalized
+    logger:info("Session source currency locked: " .. session_source_currency.currency .. " via " .. session_source_currency.detector)
+
+    return json.encode({
+        success = true,
+        locked = true,
+        data = session_source_currency,
+    })
 end
 
 function GetRateSettings()
@@ -382,6 +476,8 @@ return {
     on_unload = on_unload,
     FetchRates = FetchRates,
     GetCachedRates = GetCachedRates,
+    GetSessionSourceCurrency = GetSessionSourceCurrency,
+    SetSessionSourceCurrencyOnce = SetSessionSourceCurrencyOnce,
     GetRateSettings = GetRateSettings,
     GetSupportedTargetCurrencies = GetSupportedTargetCurrencies,
     SetRateSource = SetRateSource,

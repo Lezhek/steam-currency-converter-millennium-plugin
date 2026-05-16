@@ -4,18 +4,27 @@ import { callable } from '@steambrew/webkit';
 declare const window: any;
 declare const Millennium: any;
 
+type SetSessionSourceCurrencyPayload = {
+  currency: string;
+};
+
 function GM_addStyle(css: string) {
   const style = document.createElement('style');
   style.textContent = css;
   document.head.appendChild(style);
 }
 
+const GetCachedRates = callable<[], string>("GetCachedRates");
+const GetSessionSourceCurrency = callable<[], string>("GetSessionSourceCurrency");
+const SetSessionSourceCurrencyOnce = callable<[SetSessionSourceCurrencyPayload], string>("SetSessionSourceCurrencyOnce");
+
 
 const signToValute: Record<string, string> = {
-  "₸": "KZT", "TL": "TRY", "€": "EUR", "£": "GBP", "ARS$": "ARS", "₴": "UAH", "₽": "RUB", "руб": "RUB", "$": "USD",
-  "zł": "PLN", "R$": "BRL", "¥": "JPY", "kr": "NOK", "Rp": "IDR", "RM": "MYR", "P": "PHP",
+  "₸": "KZT", "KZT": "KZT", "TL": "TRY", "TRY": "TRY", "₺": "TRY", "€": "EUR", "£": "GBP", "ARS$": "ARS", "₴": "UAH",
+  "₽": "RUB", "руб.": "RUB", "руб": "RUB", "RUB": "RUB", "$": "USD",
+  "zł": "PLN", "R$": "BRL", "CN¥": "CNY", "RMB": "CNY", "¥": "JPY", "kr": "NOK", "Rp": "IDR", "RM": "MYR", "PHP": "PHP", "₱": "PHP", "P": "PHP",
   "S$": "SGD", "฿": "THB", "₫": "VND", "₩": "KRW", "Mex$": "MXN", "CDN$": "CAD", "A$": "AUD",
-  "NZ$": "NZD", "₹": "INR", "CLP$": "CLP", "S/.": "PEN", "COL$": "COP", "R ": "ZAR", "HK$": "HKD",
+  "NZ$": "NZD", "₹": "INR", "CLP$": "CLP", "S/.": "PEN", "S/": "PEN", "COL$": "COP", "R ": "ZAR", "HK$": "HKD",
   "NT$": "TWD", "SR": "SAR", "DH": "AED", "₪": "ILS", "KD": "KWD", "QR": "QAR", "₡": "CRC",
   "$U": "UYU", "CHF": "CHF", "pуб": "RUB"
 };
@@ -67,6 +76,7 @@ const findCurrencyById = (id: number) => steamCurrencies.find(c => c.id === id);
 // --- State ---
 let valute: string | null = null;
 let valuteSign: string | null = null;
+let sourceCurrencyDetector: string | null = null;
 let currency: any = null;
 let isReady = false;
 let initialQueue: HTMLElement[] = [];
@@ -415,25 +425,72 @@ const formatConvertedPrice = (price: number): string | null => {
   return normalizeFormattedCurrency(formatted, targetCurrency);
 };
 
-const getSourceCurrencyTokens = (): string[] => {
+type CurrencyConfidence =
+  | "session-cache"
+  | "meta"
+  | "wallet-global"
+  | "store-single-currency-scan"
+  | "leaf-token"
+  | "data-price";
+
+type ParsedCurrencyPrice = {
+  amount: number;
+  currencyCode: string;
+  token: string;
+  confidence: CurrencyConfidence;
+};
+
+type SourceCurrencyPriceMatch = ParsedCurrencyPrice & {
+  text: string;
+  start: number;
+  end: number;
+  price: number;
+};
+
+const getDefaultCurrencySign = (currencyCode: string): string | null => {
+  const currencyInfo = getCurrencyInfo(currencyCode);
+  if (currencyInfo?.symbol?.trim()) return currencyInfo.symbol.trim();
+
+  const alias = sourceCurrencyAliases[currencyCode]?.find(token => token.trim());
+  if (alias) return alias.trim();
+
+  return Object.keys(signToValute).find(sign => signToValute[sign] === currencyCode) || null;
+};
+
+const applySourceCurrency = (currencyCode: string | null | undefined, sign?: string | null, detector?: string): boolean => {
+  const normalizedCode = currencyCode?.toString().trim().toUpperCase();
+  if (!normalizedCode || !getCurrencyInfo(normalizedCode)) return false;
+
+  valute = normalizedCode;
+  valuteSign = sign?.trim() || getDefaultCurrencySign(normalizedCode);
+  sourceCurrencyDetector = detector || sourceCurrencyDetector;
+  return true;
+};
+
+const getCurrencyTokens = (currencyCode: string | null | undefined): string[] => {
   const tokens = new Set<string>();
+  const normalizedCode = currencyCode?.toString().trim().toUpperCase();
+  if (!normalizedCode) return [];
 
-  if (valuteSign?.trim()) tokens.add(valuteSign.trim());
-  if (valute?.trim()) tokens.add(valute.trim().toUpperCase());
+  tokens.add(normalizedCode);
 
-  const sourceCurrency = valute ? getCurrencyInfo(valute) : null;
+  const sourceCurrency = getCurrencyInfo(normalizedCode);
   if (sourceCurrency?.symbol?.trim()) tokens.add(sourceCurrency.symbol.trim());
 
-  if (valute) {
-    sourceCurrencyAliases[valute]?.forEach(token => {
-      if (token.trim()) tokens.add(token.trim());
-    });
+  sourceCurrencyAliases[normalizedCode]?.forEach(token => {
+    if (token.trim()) tokens.add(token.trim());
+  });
 
-    Object.entries(signToValute).forEach(([sign, code]) => {
-      if (code === valute && sign.trim()) tokens.add(sign.trim());
-    });
-  }
+  Object.entries(signToValute).forEach(([sign, code]) => {
+    if (code === normalizedCode && sign.trim()) tokens.add(sign.trim());
+  });
 
+  return Array.from(tokens).filter(Boolean).sort((a, b) => b.length - a.length);
+};
+
+const getSourceCurrencyTokens = (): string[] => {
+  const tokens = new Set(getCurrencyTokens(valute));
+  if (valuteSign?.trim()) tokens.add(valuteSign.trim());
   return Array.from(tokens).filter(Boolean).sort((a, b) => b.length - a.length);
 };
 
@@ -457,35 +514,47 @@ const getCurrencyTokenPattern = (token: string): string => {
   return escapeRegExp(token);
 };
 
-type SourceCurrencyPriceMatch = {
-  text: string;
-  start: number;
-  end: number;
-  price: number;
-};
-
-const getRawSourceCurrencyPriceMatches = (text: string): SourceCurrencyPriceMatch[] => {
+const getRawCurrencyPriceMatches = (
+  text: string,
+  currencyCode: string,
+  confidence: CurrencyConfidence = "leaf-token"
+): SourceCurrencyPriceMatch[] => {
   const matches: SourceCurrencyPriceMatch[] = [];
   const numberPattern = "\\d[\\d\\s.,]*";
 
-  getSourceCurrencyTokens().forEach(token => {
+  getCurrencyTokens(currencyCode).forEach(token => {
     const tokenPattern = getCurrencyTokenPattern(token);
     const patterns = [
-      new RegExp(`${tokenPattern}\\s*(${numberPattern})`, "gi"),
-      new RegExp(`(${numberPattern})\\s*${tokenPattern}`, "gi"),
+      {
+        pattern: new RegExp(`(^|[^A-Za-z])(${tokenPattern})\\s*(${numberPattern})`, "gi"),
+        priceGroup: 3,
+        tokenGroup: 2,
+        startOffsetGroup: 1,
+      },
+      {
+        pattern: new RegExp(`(^|[^\\dA-Za-z])(${numberPattern})\\s*(${tokenPattern})(?=$|[^A-Za-z])`, "gi"),
+        priceGroup: 2,
+        tokenGroup: 3,
+        startOffsetGroup: 1,
+      },
     ];
 
-    patterns.forEach(pattern => {
+    patterns.forEach(({ pattern, priceGroup, tokenGroup, startOffsetGroup }) => {
       let match: RegExpExecArray | null;
       while ((match = pattern.exec(text)) !== null) {
-        const rawMatch = match[0];
-        const price = parsePriceText(match[1]);
+        const boundaryOffset = match[startOffsetGroup]?.length || 0;
+        const rawMatch = match[0].slice(boundaryOffset);
+        const price = parsePriceText(match[priceGroup]);
         if (price !== null) {
           matches.push({
             text: rawMatch.trim(),
-            start: match.index,
-            end: match.index + rawMatch.length,
+            start: match.index + boundaryOffset,
+            end: match.index + match[0].length,
             price,
+            amount: price,
+            currencyCode,
+            token: match[tokenGroup],
+            confidence,
           });
         }
 
@@ -507,10 +576,12 @@ const normalizeMatchedPriceText = (text: string): string => {
   return text.replace(/\s+/g, " ").trim();
 };
 
-const getSourceCurrencyPriceMatches = (text: string): SourceCurrencyPriceMatch[] => {
-  const sortedMatches = getRawSourceCurrencyPriceMatches(text).sort((a, b) => {
+const dedupeCurrencyPriceMatches = (matches: SourceCurrencyPriceMatch[]): SourceCurrencyPriceMatch[] => {
+  const sortedMatches = matches.sort((a, b) => {
     const lengthDelta = (b.end - b.start) - (a.end - a.start);
     if (lengthDelta !== 0) return lengthDelta;
+    const tokenLengthDelta = b.token.length - a.token.length;
+    if (tokenLengthDelta !== 0) return tokenLengthDelta;
     return a.start - b.start;
   });
 
@@ -539,11 +610,42 @@ const getSourceCurrencyPriceMatches = (text: string): SourceCurrencyPriceMatch[]
   return dedupedMatches.sort((a, b) => a.start - b.start);
 };
 
-const textContainsSourceCurrencyPrice = (text: string): boolean => {
-  return getSourceCurrencyPriceMatches(text).length > 0;
+const getCurrencyPriceMatches = (
+  text: string,
+  currencyCode: string,
+  confidence: CurrencyConfidence = "leaf-token"
+): SourceCurrencyPriceMatch[] => {
+  return dedupeCurrencyPriceMatches(getRawCurrencyPriceMatches(text, currencyCode, confidence));
 };
 
-const parseSourceCurrencyPriceText = (text: string): number | null => {
+const getSourceCurrencyPriceMatches = (text: string): SourceCurrencyPriceMatch[] => {
+  if (!valute) return [];
+  return getCurrencyPriceMatches(text, valute, sourceCurrencyDetector === "session-cache" ? "session-cache" : "leaf-token");
+};
+
+const getAllCurrencyPriceMatches = (text: string): SourceCurrencyPriceMatch[] => {
+  return dedupeCurrencyPriceMatches(
+    steamCurrencies.flatMap(steamCurrency => getRawCurrencyPriceMatches(text, steamCurrency.abbr, "leaf-token"))
+  );
+};
+
+const getConflictingCurrencyPriceMatches = (text: string, expectedCurrency: string): SourceCurrencyPriceMatch[] => {
+  const normalizedExpected = expectedCurrency.toUpperCase();
+  return getAllCurrencyPriceMatches(text).filter(match => match.currencyCode !== normalizedExpected);
+};
+
+const textContainsConflictingCurrencyPrice = (text: string, expectedCurrency: string | null = valute): boolean => {
+  if (!expectedCurrency) return false;
+  return getConflictingCurrencyPriceMatches(text, expectedCurrency).length > 0;
+};
+
+const textContainsSourceCurrencyPrice = (text: string): boolean => {
+  return !textContainsConflictingCurrencyPrice(text) && getSourceCurrencyPriceMatches(text).length > 0;
+};
+
+const parseSourceCurrencyPrice = (text: string): ParsedCurrencyPrice | null => {
+  if (!valute) return null;
+  if (textContainsConflictingCurrencyPrice(text, valute)) return null;
   if (!textContainsSourceCurrency(text)) return null;
 
   const matches = getSourceCurrencyPriceMatches(text);
@@ -553,10 +655,22 @@ const parseSourceCurrencyPriceText = (text: string): number | null => {
   const remainingText = `${text.slice(0, match.start)}${text.slice(match.end)}`.replace(/\s+/g, " ").trim();
   if (/\d/.test(remainingText)) return null;
 
-  return match.price;
+  return {
+    amount: match.price,
+    currencyCode: valute,
+    token: match.token,
+    confidence: match.confidence,
+  };
+};
+
+const parseSourceCurrencyPriceText = (text: string): number | null => {
+  return parseSourceCurrencyPrice(text)?.amount ?? null;
 };
 
 const parseTrailingSourceCurrencyPriceText = (text: string): number | null => {
+  if (!valute) return null;
+  if (textContainsConflictingCurrencyPrice(text, valute)) return null;
+
   const trimmedText = text.trim();
   const trailingMatch = getSourceCurrencyPriceMatches(trimmedText).find(match => {
     return match.end === trimmedText.length;
@@ -1051,61 +1165,190 @@ const injectMarketPrice = (cell: HTMLElement) => {
 };
 
 // --- Currency Detection ---
-const grabCurrentCurrency = async (): Promise<boolean> => {
+type SourceCurrencyDetection = {
+  currency: string;
+  sign: string | null;
+  detector: "meta" | "wallet-global" | "store-single-currency-scan";
+  confidence: CurrencyConfidence;
+};
+
+const parseCallableResponse = (response: any): any => {
+  return typeof response === "string" ? JSON.parse(response) : response;
+};
+
+const sourceCurrencyFromSessionPayload = (payload: any): SourceCurrencyDetection | null => {
+  const data = payload?.data ?? payload;
+  const currencyCode = data?.currency ?? data?.sourceCurrency ?? data?.code;
+  const normalizedCode = currencyCode?.toString().trim().toUpperCase();
+  if (!normalizedCode || !getCurrencyInfo(normalizedCode)) return null;
+
+  return {
+    currency: normalizedCode,
+    sign: data?.sign || getDefaultCurrencySign(normalizedCode),
+    detector: "store-single-currency-scan",
+    confidence: "session-cache",
+  };
+};
+
+const loadSessionSourceCurrency = async (): Promise<boolean> => {
   if (valute && valuteSign) return true;
 
-  // 1. Meta tag (reliable on Store pages)
-  const meta = document.querySelector('meta[itemprop="priceCurrency"]') as HTMLMetaElement;
-  if (meta && meta.content) {
-    valute = meta.content;
-    valuteSign = Object.keys(signToValute).find(k => signToValute[k] === valute) || null;
-    if (valute && valuteSign) {
-      console.log(`[Steam RUB Converter] Currency via meta: ${valute} (${valuteSign})`);
+  try {
+    const response = parseCallableResponse(await GetSessionSourceCurrency());
+    const cachedSource = sourceCurrencyFromSessionPayload(response);
+    if (cachedSource && applySourceCurrency(cachedSource.currency, cachedSource.sign, "session-cache")) {
+      console.log(`[Steam RUB Converter] Currency via session cache: ${valute} (${valuteSign})`);
       return true;
+    }
+  } catch (e) {
+    console.warn("[Steam RUB Converter] Failed to read session source currency cache:", e);
+  }
+
+  return false;
+};
+
+const lockSessionSourceCurrency = async (detection: SourceCurrencyDetection): Promise<boolean> => {
+  try {
+    const response = parseCallableResponse(await SetSessionSourceCurrencyOnce({
+      currency: JSON.stringify({
+        currency: detection.currency,
+        sign: detection.sign || getDefaultCurrencySign(detection.currency) || "",
+        detector: detection.detector,
+        confidence: detection.confidence,
+        url: window.location.href,
+      }),
+    }));
+
+    const sessionSource = sourceCurrencyFromSessionPayload(response);
+    if (sessionSource && applySourceCurrency(sessionSource.currency, sessionSource.sign, response?.locked ? detection.detector : "session-cache")) {
+      console.log(`[Steam RUB Converter] Currency via ${response?.locked ? detection.detector : "session cache"}: ${valute} (${valuteSign})`);
+      return true;
+    }
+  } catch (e) {
+    console.warn("[Steam RUB Converter] Failed to lock session source currency; using local page value only:", e);
+  }
+
+  if (applySourceCurrency(detection.currency, detection.sign, detection.detector)) {
+    console.log(`[Steam RUB Converter] Currency via ${detection.detector}: ${valute} (${valuteSign})`);
+    return true;
+  }
+
+  return false;
+};
+
+const isStoreHostname = (): boolean => {
+  return window.location.hostname.includes("store.steampowered.com");
+};
+
+const storeSourceCurrencyScanSelectors = [
+  ".discount_final_price",
+  ".price",
+  ".game_purchase_price",
+  ".search_price",
+  ".sale_price",
+  ".package_totals_area .price",
+  ".package_totals_area .discount_final_price",
+  ".package_header_container .discount_final_price",
+  ".bundle_final_package_price",
+  ".bundle_final_price_with_discount",
+  modernStoreSaleWidgetSelector,
+  tagBrowsePriceSelector,
+];
+
+const ambiguousFirstLockTokens = new Set(["P", "R", "¥"]);
+
+const isAmbiguousFirstLockToken = (token: string): boolean => {
+  return ambiguousFirstLockTokens.has(token.trim());
+};
+
+const detectCurrencyViaStorePriceScan = (): SourceCurrencyDetection | null => {
+  if (!isStoreHostname()) return null;
+
+  const observedTokensByCurrency = new Map<string, Set<string>>();
+
+  storeSourceCurrencyScanSelectors.forEach(selector => {
+    let elements: Element[] = [];
+    try {
+      elements = Array.from(document.querySelectorAll(selector));
+    } catch (_) {
+      return;
+    }
+
+    elements.forEach(element => {
+      if (!(element instanceof HTMLElement)) return;
+      if (!isElementVisible(element)) return;
+      if (isOriginalDiscountPriceElement(element)) return;
+      if (element.closest("#header_wallet_balance, #marketWalletBalanceAmount")) return;
+
+      const text = getElementTextWithoutConvertedPrices(element);
+      if (!text || text.length > 240) return;
+
+      const matches = getAllCurrencyPriceMatches(text);
+      if (matches.length === 0) return;
+
+      const currenciesInElement = new Set(matches.map(match => match.currencyCode));
+      if (currenciesInElement.size !== 1) {
+        currenciesInElement.forEach(currencyCode => {
+          if (!observedTokensByCurrency.has(currencyCode)) observedTokensByCurrency.set(currencyCode, new Set());
+          observedTokensByCurrency.get(currencyCode)?.add("__mixed__");
+        });
+        return;
+      }
+
+      const currencyCode = matches[0].currencyCode;
+      if (!observedTokensByCurrency.has(currencyCode)) {
+        observedTokensByCurrency.set(currencyCode, new Set());
+      }
+      matches.forEach(match => observedTokensByCurrency.get(currencyCode)?.add(match.token.trim()));
+    });
+  });
+
+  if (observedTokensByCurrency.size !== 1) return null;
+
+  const [currencyCode, tokens] = Array.from(observedTokensByCurrency.entries())[0];
+  if (tokens.has("__mixed__")) return null;
+  if (tokens.size === 0 || Array.from(tokens).every(isAmbiguousFirstLockToken)) return null;
+
+  return {
+    currency: currencyCode,
+    sign: getDefaultCurrencySign(currencyCode),
+    detector: "store-single-currency-scan",
+    confidence: "store-single-currency-scan",
+  };
+};
+
+const grabCurrentCurrency = async (): Promise<boolean> => {
+  if (valute && valuteSign) return true;
+  if (await loadSessionSourceCurrency()) return true;
+
+  const meta = document.querySelector('meta[itemprop="priceCurrency"]') as HTMLMetaElement;
+  if (meta?.content) {
+    const detectedCurrency = meta.content.toString().trim().toUpperCase();
+    if (getCurrencyInfo(detectedCurrency)) {
+      return lockSessionSourceCurrency({
+        currency: detectedCurrency,
+        sign: getDefaultCurrencySign(detectedCurrency),
+        detector: "meta",
+        confidence: "meta",
+      });
     }
   }
 
-  // 2. Wallet info (reliable on community pages)
   if (typeof window.g_rgWalletInfo !== 'undefined' && window.g_rgWalletInfo.wallet_currency) {
     const wallet = findCurrencyById(window.g_rgWalletInfo.wallet_currency);
     if (wallet) {
-      valute = wallet.abbr;
-      valuteSign = wallet.symbol;
-      console.log(`[Steam RUB Converter] Currency via wallet: ${valute} (${valuteSign})`);
-      return true;
+      return lockSessionSourceCurrency({
+        currency: wallet.abbr,
+        sign: wallet.symbol || getDefaultCurrencySign(wallet.abbr),
+        detector: "wallet-global",
+        confidence: "wallet-global",
+      });
     }
   }
 
-  // 3. Scan visible price elements as last resort. React cart/wishlist and modern Store pages use hashed class names.
-  const priceEls = Array.from(document.querySelectorAll(
-    `.discount_final_price, .price, .game_purchase_price, ${modernStoreSaleWidgetSelector}, ${tagBrowsePriceSelector}`
-  ));
-  if (isReactStorePricePage()) {
-    priceEls.push(...Array.from(document.querySelectorAll("body div, body span")));
-  }
-  if (isBetaCommunityMarketPage()) {
-    priceEls.push(...Array.from(document.querySelectorAll(`${betaMarketRootSelector} div, ${betaMarketRootSelector} span, ${betaMarketRootSelector} td`)));
-  }
-
-  for (const el of priceEls) {
-    const text = el.textContent || "";
-    for (const [sign, code] of Object.entries(signToValute)) {
-      if (text.includes(sign)) {
-        valuteSign = sign;
-        valute = code;
-        console.log(`[Steam RUB Converter] Currency via price scan: ${valute} (${valuteSign})`);
-        return true;
-      }
-    }
-
-    for (const steamCurrency of steamCurrencies) {
-      if (textIncludesCurrencyToken(text, steamCurrency.abbr)) {
-        valute = steamCurrency.abbr;
-        valuteSign = steamCurrency.symbol || steamCurrency.abbr;
-        console.log(`[Steam RUB Converter] Currency via price code scan: ${valute} (${valuteSign})`);
-        return true;
-      }
-    }
+  const storeScanDetection = detectCurrencyViaStorePriceScan();
+  if (storeScanDetection) {
+    return lockSessionSourceCurrency(storeScanDetection);
   }
 
   return false;
@@ -1169,6 +1412,7 @@ const injectPrice = (element: HTMLElement) => {
   const text = element.textContent ? element.textContent.trim() : "";
   const dataPriceFinal = getDataPriceFinal(element);
   if (!text && dataPriceFinal === null) return;
+  if (text && textContainsConflictingCurrencyPrice(text)) return;
 
   // Recurse into children that contain the currency sign, rather than processing a parent container.
   const childrenWithSign = Array.from(element.children).filter(c => {
@@ -1573,8 +1817,6 @@ const scheduleSettingsWatch = () => {
 };
 
 // --- Initialization ---
-const GetCachedRates = callable("GetCachedRates");
-
 const withTimeout = <T,>(promise: Promise<T>, ms: number, message: string): Promise<T> => {
   return new Promise((resolve, reject) => {
     const timer = window.setTimeout(() => reject(new Error(message)), ms);
