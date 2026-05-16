@@ -457,24 +457,86 @@ const getCurrencyTokenPattern = (token: string): string => {
   return escapeRegExp(token);
 };
 
-const getSourceCurrencyPriceMatches = (text: string): string[] => {
-  const matches: string[] = [];
+type SourceCurrencyPriceMatch = {
+  text: string;
+  start: number;
+  end: number;
+  price: number;
+};
+
+const getRawSourceCurrencyPriceMatches = (text: string): SourceCurrencyPriceMatch[] => {
+  const matches: SourceCurrencyPriceMatch[] = [];
   const numberPattern = "\\d[\\d\\s.,]*";
 
   getSourceCurrencyTokens().forEach(token => {
     const tokenPattern = getCurrencyTokenPattern(token);
     const patterns = [
-      new RegExp(`${tokenPattern}\\s*${numberPattern}`, "gi"),
-      new RegExp(`${numberPattern}\\s*${tokenPattern}`, "gi"),
+      new RegExp(`${tokenPattern}\\s*(${numberPattern})`, "gi"),
+      new RegExp(`(${numberPattern})\\s*${tokenPattern}`, "gi"),
     ];
 
     patterns.forEach(pattern => {
-      const tokenMatches = text.match(pattern);
-      if (tokenMatches) matches.push(...tokenMatches.map(match => match.trim()));
+      let match: RegExpExecArray | null;
+      while ((match = pattern.exec(text)) !== null) {
+        const rawMatch = match[0];
+        const price = parsePriceText(match[1]);
+        if (price !== null) {
+          matches.push({
+            text: rawMatch.trim(),
+            start: match.index,
+            end: match.index + rawMatch.length,
+            price,
+          });
+        }
+
+        if (match.index === pattern.lastIndex) {
+          pattern.lastIndex += 1;
+        }
+      }
     });
   });
 
-  return Array.from(new Set(matches));
+  return matches;
+};
+
+const doRangesOverlap = (a: SourceCurrencyPriceMatch, b: SourceCurrencyPriceMatch): boolean => {
+  return a.start < b.end && b.start < a.end;
+};
+
+const normalizeMatchedPriceText = (text: string): string => {
+  return text.replace(/\s+/g, " ").trim();
+};
+
+const getSourceCurrencyPriceMatches = (text: string): SourceCurrencyPriceMatch[] => {
+  const sortedMatches = getRawSourceCurrencyPriceMatches(text).sort((a, b) => {
+    const lengthDelta = (b.end - b.start) - (a.end - a.start);
+    if (lengthDelta !== 0) return lengthDelta;
+    return a.start - b.start;
+  });
+
+  const dedupedMatches: SourceCurrencyPriceMatch[] = [];
+
+  sortedMatches.forEach(match => {
+    const overlappingMatch = dedupedMatches.find(existing => doRangesOverlap(existing, match));
+    if (overlappingMatch) {
+      return;
+    }
+
+    const duplicateMatch = dedupedMatches.find(existing => {
+      return (
+        existing.start === match.start &&
+        existing.end === match.end &&
+        existing.price === match.price &&
+        normalizeMatchedPriceText(existing.text) === normalizeMatchedPriceText(match.text)
+      );
+    });
+
+    if (!duplicateMatch) {
+      dedupedMatches.push(match);
+    }
+  });
+
+  return dedupedMatches.sort((a, b) => a.start - b.start);
 };
 
 const textContainsSourceCurrencyPrice = (text: string): boolean => {
@@ -487,32 +549,20 @@ const parseSourceCurrencyPriceText = (text: string): number | null => {
   const matches = getSourceCurrencyPriceMatches(text);
   if (matches.length !== 1) return null;
 
-  const remainingText = text.replace(matches[0], "").replace(/\s+/g, " ").trim();
+  const match = matches[0];
+  const remainingText = `${text.slice(0, match.start)}${text.slice(match.end)}`.replace(/\s+/g, " ").trim();
   if (/\d/.test(remainingText)) return null;
 
-  return parsePriceText(matches[0]);
+  return match.price;
 };
 
 const parseTrailingSourceCurrencyPriceText = (text: string): number | null => {
-  const numberPattern = "\\d[\\d\\s.,]*";
+  const trimmedText = text.trim();
+  const trailingMatch = getSourceCurrencyPriceMatches(trimmedText).find(match => {
+    return match.end === trimmedText.length;
+  });
 
-  for (const token of getSourceCurrencyTokens()) {
-    const tokenPattern = getCurrencyTokenPattern(token);
-    const trailingPricePatterns = [
-      new RegExp(`(${numberPattern}\\s*${tokenPattern})\\s*$`, "i"),
-      new RegExp(`(${tokenPattern}\\s*${numberPattern})\\s*$`, "i"),
-    ];
-
-    for (const pattern of trailingPricePatterns) {
-      const match = text.match(pattern);
-      if (!match?.[1]) continue;
-
-      const price = parsePriceText(match[1]);
-      if (price !== null) return price;
-    }
-  }
-
-  return null;
+  return trailingMatch?.price ?? null;
 };
 
 const getMarketPriceCell = (element: HTMLElement): HTMLElement | null => {
@@ -656,7 +706,7 @@ const isModernStorePriceLeaf = (element: HTMLElement): boolean => {
   if (isOriginalDiscountPriceElement(element)) return false;
 
   const text = getElementTextWithoutConvertedPrices(element);
-  return textContainsSourceCurrencyPrice(text) && parsePriceText(text) !== null;
+  return parseSourceCurrencyPriceText(text) !== null;
 };
 
 const collectModernStoreSaleWidgetPriceElements = (widget: HTMLElement): HTMLElement[] => {
@@ -778,7 +828,7 @@ const isCartPriceElement = (element: HTMLElement): boolean => {
 
   const text = getElementTextWithoutConvertedPrices(element);
   if (!text || !textContainsSourceCurrencyPrice(text)) return false;
-  if (parsePriceText(text) === null) return false;
+  if (parseSourceCurrencyPriceText(text) === null) return false;
 
   const parent = element.parentElement;
   if (!parent) return false;
@@ -789,7 +839,7 @@ const isCartPriceElement = (element: HTMLElement): boolean => {
     if (isOriginalDiscountPriceElement(childElement)) return false;
 
     const childText = getElementTextWithoutConvertedPrices(childElement);
-    return !!childText && textContainsSourceCurrencyPrice(childText) && parsePriceText(childText) !== null;
+    return !!childText && parseSourceCurrencyPriceText(childText) !== null;
   });
 
   if (priceChildren.length === 0) return false;
@@ -806,7 +856,7 @@ const injectStandaloneMarketPrice = (element: HTMLElement, extraClassName: strin
   const text = getElementTextWithoutConvertedPrices(element);
   if (!textContainsSourceCurrencyPrice(text)) return;
 
-  const price = getDataPriceFinal(element) ?? parsePriceText(text);
+  const price = getDataPriceFinal(element) ?? parseSourceCurrencyPriceText(text);
   if (!price) return;
 
   const formatted = formatConvertedPrice(price);
@@ -926,7 +976,7 @@ const injectModernStorePrice = (element: HTMLElement) => {
   const text = getElementTextWithoutConvertedPrices(element);
   if (!textContainsSourceCurrencyPrice(text)) return;
 
-  const price = parsePriceText(text);
+  const price = parseSourceCurrencyPriceText(text);
   if (!price) return;
 
   const formatted = formatConvertedPrice(price);
@@ -950,7 +1000,7 @@ const injectCartPrice = (element: HTMLElement) => {
   const text = getElementTextWithoutConvertedPrices(element);
   if (!textContainsSourceCurrencyPrice(text)) return;
 
-  const price = getDataPriceFinal(element) ?? parsePriceText(text);
+  const price = getDataPriceFinal(element) ?? parseSourceCurrencyPriceText(text);
   if (!price) return;
 
   const formatted = formatConvertedPrice(price);
@@ -983,7 +1033,7 @@ const injectMarketPrice = (cell: HTMLElement) => {
   const text = getElementTextWithoutConvertedPrices(priceElement);
   if (!textContainsSourceCurrencyPrice(text)) return;
 
-  const price = getDataPriceFinal(priceElement) ?? parsePriceText(text);
+  const price = getDataPriceFinal(priceElement) ?? parseSourceCurrencyPriceText(text);
   if (!price) return;
 
   const formatted = formatConvertedPrice(price);
@@ -1157,7 +1207,7 @@ const injectPrice = (element: HTMLElement) => {
   if (dataPriceFinal !== null) {
     price = dataPriceFinal;
   } else {
-    price = parsePriceText(text);
+    price = parseSourceCurrencyPriceText(text);
   }
 
   if (!price || isNaN(price)) return;
