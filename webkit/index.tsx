@@ -344,6 +344,16 @@ const isInjectedPriceNode = (node: Node): boolean => {
 const isOwnPriceMutation = (mutation: MutationRecord): boolean => {
   if (mutation.type === "childList") {
     const changedNodes = [...Array.from(mutation.addedNodes), ...Array.from(mutation.removedNodes)];
+    const targetElement = mutation.target instanceof HTMLElement ? mutation.target : null;
+    const removedOnlyInjectedPrice =
+      mutation.addedNodes.length === 0 &&
+      mutation.removedNodes.length > 0 &&
+      Array.from(mutation.removedNodes).every(isInjectedPriceNode);
+
+    if (removedOnlyInjectedPrice && targetElement?.classList.contains("steam-rub-beta-market-price-source")) {
+      return false;
+    }
+
     return changedNodes.length > 0 && changedNodes.every(isInjectedPriceNode);
   }
 
@@ -354,6 +364,7 @@ const dynamicBundlePriceSelector = ".dynamic_bundle_description .discount_block[
 const storePurchaseDropdownPriceSelector = ".game_area_purchase_game_dropdown_menu_container .game_area_purchase_game_dropdown_menu_item_text";
 const modernStoreSaleWidgetSelector = ".StoreSalePriceWidgetContainer";
 const tagBrowsePriceSelector = ".browse_tag_game_price";
+const betaMarketRootSelector = "#CommunityTemplate";
 
 const roundConvertedAmount = (amount: number, currencyCode: string): number => {
   const fractionDigits = getDisplayFractionDigits(currencyCode);
@@ -417,6 +428,76 @@ const formatConvertedPrice = (price: number): string | null => {
   return normalizeFormattedCurrency(formatted, targetCurrency);
 };
 
+const getSourceCurrencyTokens = (): string[] => {
+  const tokens = new Set<string>();
+
+  if (valuteSign?.trim()) tokens.add(valuteSign.trim());
+  if (valute?.trim()) tokens.add(valute.trim().toUpperCase());
+
+  const sourceCurrency = valute ? getCurrencyInfo(valute) : null;
+  if (sourceCurrency?.symbol?.trim()) tokens.add(sourceCurrency.symbol.trim());
+
+  if (valute) {
+    Object.entries(signToValute).forEach(([sign, code]) => {
+      if (code === valute && sign.trim()) tokens.add(sign.trim());
+    });
+  }
+
+  return Array.from(tokens).filter(Boolean).sort((a, b) => b.length - a.length);
+};
+
+const isCurrencyCodeToken = (token: string): boolean => /^[A-Z]{3}$/.test(token);
+
+const textIncludesCurrencyToken = (text: string, token: string): boolean => {
+  if (!token) return false;
+
+  if (isCurrencyCodeToken(token)) {
+    return new RegExp(`(^|[^A-Z])${escapeRegExp(token)}([^A-Z]|$)`, "i").test(text);
+  }
+
+  return text.includes(token);
+};
+
+const textContainsSourceCurrency = (text: string): boolean => {
+  return getSourceCurrencyTokens().some(token => textIncludesCurrencyToken(text, token));
+};
+
+const getCurrencyTokenPattern = (token: string): string => {
+  return escapeRegExp(token);
+};
+
+const getSourceCurrencyPriceMatches = (text: string): string[] => {
+  const matches: string[] = [];
+  const numberPattern = "\\d[\\d\\s.,]*";
+
+  getSourceCurrencyTokens().forEach(token => {
+    const tokenPattern = getCurrencyTokenPattern(token);
+    const patterns = [
+      new RegExp(`${tokenPattern}\\s*${numberPattern}`, "gi"),
+      new RegExp(`${numberPattern}\\s*${tokenPattern}`, "gi"),
+    ];
+
+    patterns.forEach(pattern => {
+      const tokenMatches = text.match(pattern);
+      if (tokenMatches) matches.push(...tokenMatches.map(match => match.trim()));
+    });
+  });
+
+  return Array.from(new Set(matches));
+};
+
+const parseSourceCurrencyPriceText = (text: string): number | null => {
+  if (!textContainsSourceCurrency(text)) return null;
+
+  const matches = getSourceCurrencyPriceMatches(text);
+  if (matches.length !== 1) return null;
+
+  const remainingText = text.replace(matches[0], "").replace(/\s+/g, " ").trim();
+  if (/\d/.test(remainingText)) return null;
+
+  return parsePriceText(matches[0]);
+};
+
 const getMarketPriceCell = (element: HTMLElement): HTMLElement | null => {
   return element.closest(
     ".market_listing_their_price, .market_listing_price, .market_listing_price_listings_block"
@@ -465,6 +546,73 @@ const isMarketRecentListingPriceElement = (element: HTMLElement): boolean => {
     "#sellListingsTable .market_listing_price_with_fee, " +
     "#soldListingTable .market_listing_price_with_fee"
   );
+};
+
+const isCommunityMarketPage = (): boolean => {
+  return window.location.hostname.includes("steamcommunity.com") && window.location.pathname.startsWith("/market");
+};
+
+const isBetaCommunityMarketPage = (): boolean => {
+  return isCommunityMarketPage() && document.querySelector(betaMarketRootSelector) !== null;
+};
+
+const isIgnoredBetaMarketPriceContext = (element: HTMLElement): boolean => {
+  return !!element.closest(
+    ".steam-rub-price, svg, canvas, script, style, input, textarea, select, option, template, noscript, " +
+    ".recharts-wrapper, .recharts-surface, [class*='recharts']"
+  );
+};
+
+const childContainsSourceCurrencyToken = (element: HTMLElement): boolean => {
+  return Array.from(element.children).some(child => {
+    return textContainsSourceCurrency(getElementTextWithoutConvertedPrices(child as HTMLElement));
+  });
+};
+
+const hasDirectConvertedPrice = (element: HTMLElement): boolean => {
+  return Array.from(element.children).some(child => child.classList.contains("steam-rub-price"));
+};
+
+const isBetaMarketPriceLeaf = (element: HTMLElement): boolean => {
+  if (!isBetaCommunityMarketPage()) return false;
+  if (element.classList.contains("done") && hasDirectConvertedPrice(element)) return false;
+  if (!element.closest(betaMarketRootSelector)) return false;
+  if (!element.matches("span, div, td")) return false;
+  if (!isElementVisible(element)) return false;
+  if (isIgnoredBetaMarketPriceContext(element)) return false;
+  if (childContainsSourceCurrencyToken(element)) return false;
+
+  const text = getElementTextWithoutConvertedPrices(element);
+  if (!text || text.length > 100) return false;
+
+  return parseSourceCurrencyPriceText(text) !== null;
+};
+
+const collectBetaMarketPriceElements = (node: Node): HTMLElement[] => {
+  if (!isBetaCommunityMarketPage()) return [];
+
+  const element = node.nodeType === Node.ELEMENT_NODE ? node as HTMLElement : node.parentElement;
+  if (!element) return [];
+
+  const priceElements = new Set<HTMLElement>();
+
+  if (isBetaMarketPriceLeaf(element)) {
+    priceElements.add(element);
+  }
+
+  if (element.querySelectorAll) {
+    element.querySelectorAll("span, div, td").forEach(candidate => {
+      if (candidate instanceof HTMLElement && isBetaMarketPriceLeaf(candidate)) {
+        priceElements.add(candidate);
+      }
+    });
+  }
+
+  return Array.from(priceElements);
+};
+
+const isBetaMarketPriceElement = (element: HTMLElement): boolean => {
+  return isBetaMarketPriceLeaf(element);
 };
 
 const isDynamicBundlePriceElement = (element: HTMLElement): boolean => {
@@ -664,6 +812,29 @@ const injectMarketCommodityPrice = (element: HTMLElement) => {
   injectStandaloneMarketPrice(element, "is-market-commodity-price");
 };
 
+const injectBetaMarketPrice = (element: HTMLElement) => {
+  if (element.classList.contains("done") && hasDirectConvertedPrice(element)) return;
+  if (!currency || !valute || valute === getTargetCurrency()) return;
+  if (!getConversionRates()) return;
+
+  const text = getElementTextWithoutConvertedPrices(element);
+  const price = parseSourceCurrencyPriceText(text);
+  if (!price) return;
+
+  const formatted = formatConvertedPrice(price);
+  if (!formatted) return;
+
+  const span = document.createElement("span");
+  span.className = "steam-rub-price is-market-price steam-rub-beta-market-price";
+  span.textContent = `≈${formatted}`;
+
+  withObserverPaused(() => {
+    element.querySelectorAll(".steam-rub-price").forEach(el => el.remove());
+    element.classList.add("done", "steam-rub-market-price-source", "steam-rub-beta-market-price-source");
+    element.appendChild(span);
+  });
+};
+
 const resetDynamicBundlePrice = (element: HTMLElement) => {
   withObserverPaused(() => {
     element.querySelectorAll(".steam-rub-dynamic-bundle-price").forEach(el => el.remove());
@@ -848,6 +1019,9 @@ const grabCurrentCurrency = async (): Promise<boolean> => {
   if (isReactStorePricePage()) {
     priceEls.push(...Array.from(document.querySelectorAll("body div, body span")));
   }
+  if (isBetaCommunityMarketPage()) {
+    priceEls.push(...Array.from(document.querySelectorAll(`${betaMarketRootSelector} div, ${betaMarketRootSelector} span, ${betaMarketRootSelector} td`)));
+  }
 
   for (const el of priceEls) {
     const text = el.textContent || "";
@@ -859,6 +1033,15 @@ const grabCurrentCurrency = async (): Promise<boolean> => {
         return true;
       }
     }
+
+    for (const steamCurrency of steamCurrencies) {
+      if (textIncludesCurrencyToken(text, steamCurrency.abbr)) {
+        valute = steamCurrency.abbr;
+        valuteSign = steamCurrency.symbol || steamCurrency.abbr;
+        console.log(`[Steam RUB Converter] Currency via price code scan: ${valute} (${valuteSign})`);
+        return true;
+      }
+    }
   }
 
   return false;
@@ -866,8 +1049,14 @@ const grabCurrentCurrency = async (): Promise<boolean> => {
 
 // --- Price Injection ---
 const injectPrice = (element: HTMLElement) => {
-  if (element.classList.contains("done")) return;
   if (!currency || !valute || !valuteSign) return;
+
+  if (isBetaMarketPriceElement(element)) {
+    injectBetaMarketPrice(element);
+    return;
+  }
+
+  if (element.classList.contains("done")) return;
 
   if (isDynamicBundlePriceElement(element)) return;
   if (isOriginalDiscountPriceElement(element)) return;
@@ -1064,6 +1253,15 @@ const processFullPage = () => {
     injectModernStorePrice(el);
   });
 
+  collectBetaMarketPriceElements(document.body).forEach(el => {
+    if (!isReady) {
+      if (!initialQueue.includes(el)) initialQueue.push(el);
+      return;
+    }
+
+    injectBetaMarketPrice(el);
+  });
+
   document.querySelectorAll(dynamicBundlePriceSelector).forEach(el => {
     if (!isReady) {
       if (!initialQueue.includes(el as HTMLElement)) initialQueue.push(el as HTMLElement);
@@ -1141,6 +1339,15 @@ const findProcessableElement = (node: Node): HTMLElement | null => {
     return modernStorePrice;
   }
 
+  if (isBetaMarketPriceElement(element)) {
+    return element;
+  }
+
+  const betaMarketPrice = collectBetaMarketPriceElements(element)[0];
+  if (betaMarketPrice) {
+    return betaMarketPrice;
+  }
+
   if (element.matches && matchesAnyTargetSelector(element)) {
     return element;
   }
@@ -1165,6 +1372,9 @@ const handleMutations = (mutations: MutationRecord[]) => {
     collectModernStorePriceElements(mutation.target).forEach(el => {
       toProcess.add(el);
     });
+    collectBetaMarketPriceElements(mutation.target).forEach(el => {
+      toProcess.add(el);
+    });
 
     if (mutation.type === 'characterData' || mutation.type === 'attributes') {
       const target = findProcessableElement(mutation.target);
@@ -1178,6 +1388,7 @@ const handleMutations = (mutations: MutationRecord[]) => {
           }
           target.classList.remove("done");
           target.classList.remove("steam-rub-cart-price-source");
+          target.classList.remove("steam-rub-beta-market-price-source");
           target.querySelectorAll(".steam-rub-price").forEach(el => el.remove());
         });
         if (isDynamicBundlePriceElement(target)) {
@@ -1201,6 +1412,9 @@ const handleMutations = (mutations: MutationRecord[]) => {
           dynamicBundlePricesToProcess.add(priceElement);
         });
         collectModernStorePriceElements(el).forEach(priceElement => {
+          toProcess.add(priceElement);
+        });
+        collectBetaMarketPriceElements(el).forEach(priceElement => {
           toProcess.add(priceElement);
         });
 
@@ -1269,6 +1483,7 @@ const resetConvertedPrices = () => {
     document.querySelectorAll(".steam-rub-modern-store-price-source").forEach(el => el.classList.remove("steam-rub-modern-store-price-source"));
     document.querySelectorAll(".steam-rub-market-done").forEach(el => el.classList.remove("steam-rub-market-done"));
     document.querySelectorAll(".steam-rub-market-price-source").forEach(el => el.classList.remove("steam-rub-market-price-source"));
+    document.querySelectorAll(".steam-rub-beta-market-price-source").forEach(el => el.classList.remove("steam-rub-beta-market-price-source"));
     document.querySelectorAll(".steam-rub-dynamic-bundle-done").forEach(el => el.classList.remove("steam-rub-dynamic-bundle-done"));
   });
   processFullPage();
@@ -1507,6 +1722,15 @@ export default function WebkitMain() {
       color: inherit !important;
       white-space: nowrap !important;
       vertical-align: baseline !important;
+    }
+    .steam-rub-beta-market-price {
+      margin-left: 5px !important;
+      color: rgba(199, 213, 224, 0.72) !important;
+      font-size: 0.92em !important;
+      font-weight: inherit !important;
+    }
+    .steam-rub-beta-market-price-source {
+      white-space: nowrap !important;
     }
     .market_listing_their_price .steam-rub-market-list-price-source .steam-rub-price.is-market-price,
     .market_listing_price .steam-rub-market-list-price-source .steam-rub-price.is-market-price,
