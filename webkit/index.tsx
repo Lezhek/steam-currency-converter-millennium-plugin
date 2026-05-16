@@ -352,6 +352,8 @@ const isOwnPriceMutation = (mutation: MutationRecord): boolean => {
 
 const dynamicBundlePriceSelector = ".dynamic_bundle_description .discount_block[data-price-final] .discount_final_price";
 const storePurchaseDropdownPriceSelector = ".game_area_purchase_game_dropdown_menu_container .game_area_purchase_game_dropdown_menu_item_text";
+const modernStoreSaleWidgetSelector = ".StoreSalePriceWidgetContainer";
+const tagBrowsePriceSelector = ".browse_tag_game_price";
 
 const roundConvertedAmount = (amount: number, currencyCode: string): number => {
   const fractionDigits = getDisplayFractionDigits(currencyCode);
@@ -448,6 +450,16 @@ const isReactStorePricePage = (): boolean => {
   return isShoppingCartPage() || isWishlistPage();
 };
 
+const isModernStoreCollectionPage = (): boolean => {
+  const path = window.location.pathname;
+  return (
+    path.startsWith("/dlcforyou") ||
+    path.startsWith("/category/") ||
+    path.startsWith("/charts/") ||
+    path.startsWith("/tag/browse")
+  );
+};
+
 const isMarketRecentListingPriceElement = (element: HTMLElement): boolean => {
   return element.matches(
     "#sellListingsTable .market_listing_price_with_fee, " +
@@ -457,6 +469,102 @@ const isMarketRecentListingPriceElement = (element: HTMLElement): boolean => {
 
 const isDynamicBundlePriceElement = (element: HTMLElement): boolean => {
   return element.closest(".dynamic_bundle_description") !== null;
+};
+
+const isElementVisible = (element: HTMLElement): boolean => {
+  const rect = element.getBoundingClientRect();
+  if (rect.width <= 0 || rect.height <= 0) return false;
+
+  const style = window.getComputedStyle(element);
+  return style.display !== "none" && style.visibility !== "hidden";
+};
+
+const childContainsSourceCurrency = (element: HTMLElement): boolean => {
+  if (!valuteSign) return false;
+
+  return Array.from(element.children).some(child => {
+    return getElementTextWithoutConvertedPrices(child as HTMLElement).includes(valuteSign as string);
+  });
+};
+
+const isModernStorePriceLeaf = (element: HTMLElement): boolean => {
+  if (!valuteSign) return false;
+  if (!isElementVisible(element)) return false;
+  if (childContainsSourceCurrency(element)) return false;
+  if (isOriginalDiscountPriceElement(element)) return false;
+
+  const text = getElementTextWithoutConvertedPrices(element);
+  return text.includes(valuteSign) && parsePriceText(text) !== null;
+};
+
+const collectModernStoreSaleWidgetPriceElements = (widget: HTMLElement): HTMLElement[] => {
+  const priceLeaves = Array.from(widget.querySelectorAll("div, span"))
+    .filter((candidate): candidate is HTMLElement => {
+      return candidate instanceof HTMLElement && isModernStorePriceLeaf(candidate);
+    });
+
+  if (priceLeaves.length === 0) return [];
+  if (widget.classList.contains("Discounted") && priceLeaves.length > 1) {
+    return [priceLeaves[priceLeaves.length - 1]];
+  }
+
+  return priceLeaves;
+};
+
+const collectModernStorePriceElements = (node: Node): HTMLElement[] => {
+  if (!isModernStoreCollectionPage()) return [];
+
+  const element = node.nodeType === Node.ELEMENT_NODE ? node as HTMLElement : node.parentElement;
+  if (!element) return [];
+
+  const priceElements = new Set<HTMLElement>();
+  const widgets = new Set<HTMLElement>();
+
+  const closestWidget = element.closest(modernStoreSaleWidgetSelector) as HTMLElement | null;
+  if (closestWidget) widgets.add(closestWidget);
+
+  if (element.matches(modernStoreSaleWidgetSelector)) {
+    widgets.add(element);
+  }
+
+  if (element.querySelectorAll) {
+    element.querySelectorAll(modernStoreSaleWidgetSelector).forEach(widget => {
+      widgets.add(widget as HTMLElement);
+    });
+  }
+
+  widgets.forEach(widget => {
+    collectModernStoreSaleWidgetPriceElements(widget).forEach(priceElement => {
+      priceElements.add(priceElement);
+    });
+  });
+
+  if (element.matches(tagBrowsePriceSelector) && isModernStorePriceLeaf(element)) {
+    priceElements.add(element);
+  }
+
+  if (element.querySelectorAll) {
+    element.querySelectorAll(tagBrowsePriceSelector).forEach(priceElement => {
+      if (isModernStorePriceLeaf(priceElement as HTMLElement)) {
+        priceElements.add(priceElement as HTMLElement);
+      }
+    });
+  }
+
+  return Array.from(priceElements);
+};
+
+const isModernStorePriceElement = (element: HTMLElement): boolean => {
+  if (!isModernStoreCollectionPage()) return false;
+
+  if (element.matches(tagBrowsePriceSelector)) {
+    return isModernStorePriceLeaf(element);
+  }
+
+  const widget = element.closest(modernStoreSaleWidgetSelector) as HTMLElement | null;
+  if (!widget) return false;
+
+  return collectModernStoreSaleWidgetPriceElements(widget).includes(element);
 };
 
 const isStorePurchaseDropdownPriceElement = (element: HTMLElement): boolean => {
@@ -625,6 +733,30 @@ const injectStorePurchaseDropdownPrice = (element: HTMLElement) => {
   });
 };
 
+const injectModernStorePrice = (element: HTMLElement) => {
+  if (element.classList.contains("done")) return;
+  if (!currency || !valute || !valuteSign || valute === getTargetCurrency()) return;
+  if (!getConversionRates()) return;
+
+  const text = getElementTextWithoutConvertedPrices(element);
+  if (!text.includes(valuteSign)) return;
+
+  const price = parsePriceText(text);
+  if (!price) return;
+
+  const formatted = formatConvertedPrice(price);
+  if (!formatted) return;
+
+  const span = document.createElement("span");
+  span.className = "steam-rub-price steam-rub-modern-store-price";
+  span.textContent = `≈${formatted}`;
+
+  withObserverPaused(() => {
+    element.classList.add("done", "steam-rub-modern-store-price-source");
+    element.appendChild(span);
+  });
+};
+
 const injectCartPrice = (element: HTMLElement) => {
   if (element.classList.contains("done")) return;
   if (!currency || !valute || !valuteSign || valute === getTargetCurrency()) return;
@@ -709,8 +841,10 @@ const grabCurrentCurrency = async (): Promise<boolean> => {
     }
   }
 
-  // 3. Scan visible price elements as last resort. React cart/wishlist prices use hashed class names.
-  const priceEls = Array.from(document.querySelectorAll('.discount_final_price, .price, .game_purchase_price'));
+  // 3. Scan visible price elements as last resort. React cart/wishlist and modern Store pages use hashed class names.
+  const priceEls = Array.from(document.querySelectorAll(
+    `.discount_final_price, .price, .game_purchase_price, ${modernStoreSaleWidgetSelector}, ${tagBrowsePriceSelector}`
+  ));
   if (isReactStorePricePage()) {
     priceEls.push(...Array.from(document.querySelectorAll("body div, body span")));
   }
@@ -740,6 +874,11 @@ const injectPrice = (element: HTMLElement) => {
 
   if (isStorePurchaseDropdownPriceElement(element)) {
     injectStorePurchaseDropdownPrice(element);
+    return;
+  }
+
+  if (isModernStorePriceElement(element)) {
+    injectModernStorePrice(element);
     return;
   }
 
@@ -882,8 +1021,6 @@ const targetSelectors = [
   "#tabContentsMyMarketHistory .market_listing_price",
   ".market_commodity_order_summary .market_commodity_orders_header_promote",
   ".market_commodity_orders_table td:first-child",
-  ".StoreSalePriceWidgetContainer:not(.Discounted) div",
-  ".StoreSalePriceWidgetContainer.Discounted div:nth-child(2) > div:nth-child(2)",
 ];
 
 const processElement = (el: HTMLElement) => {
@@ -917,6 +1054,15 @@ const processFullPage = () => {
       }
     });
   }
+
+  collectModernStorePriceElements(document.body).forEach(el => {
+    if (!isReady) {
+      if (!initialQueue.includes(el)) initialQueue.push(el);
+      return;
+    }
+
+    injectModernStorePrice(el);
+  });
 
   document.querySelectorAll(dynamicBundlePriceSelector).forEach(el => {
     if (!isReady) {
@@ -986,6 +1132,15 @@ const findProcessableElement = (node: Node): HTMLElement | null => {
     return element;
   }
 
+  if (isModernStorePriceElement(element)) {
+    return element;
+  }
+
+  const modernStorePrice = collectModernStorePriceElements(element)[0];
+  if (modernStorePrice) {
+    return modernStorePrice;
+  }
+
   if (element.matches && matchesAnyTargetSelector(element)) {
     return element;
   }
@@ -1006,6 +1161,9 @@ const handleMutations = (mutations: MutationRecord[]) => {
 
     collectDynamicBundlePriceElements(mutation.target).forEach(el => {
       dynamicBundlePricesToProcess.add(el);
+    });
+    collectModernStorePriceElements(mutation.target).forEach(el => {
+      toProcess.add(el);
     });
 
     if (mutation.type === 'characterData' || mutation.type === 'attributes') {
@@ -1041,6 +1199,9 @@ const handleMutations = (mutations: MutationRecord[]) => {
 
         collectDynamicBundlePriceElements(el).forEach(priceElement => {
           dynamicBundlePricesToProcess.add(priceElement);
+        });
+        collectModernStorePriceElements(el).forEach(priceElement => {
+          toProcess.add(priceElement);
         });
 
         if (el.matches && matchesAnyTargetSelector(el)) {
@@ -1105,6 +1266,7 @@ const resetConvertedPrices = () => {
     document.querySelectorAll(".done").forEach(el => el.classList.remove("done"));
     document.querySelectorAll(".steam-rub-cart-price-source").forEach(el => el.classList.remove("steam-rub-cart-price-source"));
     document.querySelectorAll(".steam-rub-dropdown-price-source").forEach(el => el.classList.remove("steam-rub-dropdown-price-source"));
+    document.querySelectorAll(".steam-rub-modern-store-price-source").forEach(el => el.classList.remove("steam-rub-modern-store-price-source"));
     document.querySelectorAll(".steam-rub-market-done").forEach(el => el.classList.remove("steam-rub-market-done"));
     document.querySelectorAll(".steam-rub-market-price-source").forEach(el => el.classList.remove("steam-rub-market-price-source"));
     document.querySelectorAll(".steam-rub-dynamic-bundle-done").forEach(el => el.classList.remove("steam-rub-dynamic-bundle-done"));
@@ -1325,6 +1487,16 @@ export default function WebkitMain() {
     }
     .game_area_purchase_game_dropdown_selection .steam-rub-dropdown-price {
       display: none !important;
+    }
+    .steam-rub-modern-store-price {
+      display: inline !important;
+      margin-left: 4px !important;
+      color: inherit !important;
+      font-size: 0.92em !important;
+      font-weight: inherit !important;
+      line-height: inherit !important;
+      white-space: nowrap !important;
+      vertical-align: baseline !important;
     }
     .steam-rub-price.is-market-price {
       display: inline !important;
