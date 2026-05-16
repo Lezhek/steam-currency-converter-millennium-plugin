@@ -16,7 +16,7 @@
 
 ### Установка
 1. Установить Millennium v3.0.0-beta.24 ([ручная установка](https://github.com/SteamClientHomebrew/Millennium/releases/tag/v3.0.0-beta.24) | [автоматическая установка](https://github.com/SteamClientHomebrew/Installer/releases/latest/download/MillenniumInstaller-Windows.exe))
-2. Скачать этот репозиторий и разархивировать в папку плагинов Millennium:
+2. [Скачать](https://github.com/Lezhek/steam-currency-converter-millennium-plugin/archive/refs/heads/main.zip) этот репозиторий и разархивировать в папку плагинов Millennium:
    - Windows: `Steam\plugins\steam-currency-converter-millennium-plugin-main`
    - Linux: `~millennium/plugins/steam-currency-converter-millennium-plugin-main`
 2. Включить плагин в Millennium и перезапустить Steam.
@@ -49,7 +49,7 @@ The target currency can be selected in the Millennium settings.
 ### Installation
 
 1. Install Millennium v3.0.0-beta.24 ([manual installation](https://github.com/SteamClientHomebrew/Millennium/releases/tag/v3.0.0-beta.24) | [automatic installation](https://github.com/SteamClientHomebrew/Installer/releases/latest/download/MillenniumInstaller-Windows.exe)).
-2. Download this repository and extract it to the Millennium plugins folder:
+2. [Download](https://github.com/Lezhek/steam-currency-converter-millennium-plugin/archive/refs/heads/main.zip) this repository and extract it to the Millennium plugins folder:
    - Windows: `Steam\plugins\steam-currency-converter-millennium-plugin-main`
    - Linux: `~millennium/plugins/steam-currency-converter-millennium-plugin-main`
 3. Enable the plugin in Millennium and restart Steam.
