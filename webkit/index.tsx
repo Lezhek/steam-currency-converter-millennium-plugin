@@ -285,29 +285,6 @@ const escapeRegExp = (value: string): string => {
   return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 };
 
-const parseTrailingCurrencyPriceText = (text: string): number | null => {
-  if (!valuteSign) return null;
-
-  const escapedSign = escapeRegExp(valuteSign.trim());
-  if (!escapedSign) return null;
-
-  const numberPattern = "\\d[\\d\\s.,]*";
-  const trailingPricePatterns = [
-    new RegExp(`(${numberPattern}\\s*${escapedSign})\\s*$`),
-    new RegExp(`(${escapedSign}\\s*${numberPattern})\\s*$`),
-  ];
-
-  for (const pattern of trailingPricePatterns) {
-    const match = text.match(pattern);
-    if (!match?.[1]) continue;
-
-    const price = parsePriceText(match[1]);
-    if (price !== null) return price;
-  }
-
-  return null;
-};
-
 const getElementTextWithoutConvertedPrices = (element: HTMLElement): string => {
   const clone = element.cloneNode(true) as HTMLElement;
   clone.querySelectorAll(".steam-rub-price").forEach(el => el.remove());
@@ -358,6 +335,16 @@ const isOwnPriceMutation = (mutation: MutationRecord): boolean => {
   }
 
   return isInjectedPriceNode(mutation.target);
+};
+
+const sourceCurrencyAliases: Record<string, string[]> = {
+  RUB: ["руб", "руб.", "pуб", "RUB", "₽"],
+  KZT: ["₸", "KZT"],
+  TRY: ["TL", "TRY", "₺"],
+  PHP: ["P", "PHP", "₱"],
+  CNY: ["CNY", "CN¥", "RMB", "¥"],
+  PEN: ["S/.", "S/", "PEN"],
+  ZAR: ["R", "ZAR"],
 };
 
 const dynamicBundlePriceSelector = ".dynamic_bundle_description .discount_block[data-price-final] .discount_final_price";
@@ -438,6 +425,10 @@ const getSourceCurrencyTokens = (): string[] => {
   if (sourceCurrency?.symbol?.trim()) tokens.add(sourceCurrency.symbol.trim());
 
   if (valute) {
+    sourceCurrencyAliases[valute]?.forEach(token => {
+      if (token.trim()) tokens.add(token.trim());
+    });
+
     Object.entries(signToValute).forEach(([sign, code]) => {
       if (code === valute && sign.trim()) tokens.add(sign.trim());
     });
@@ -486,6 +477,10 @@ const getSourceCurrencyPriceMatches = (text: string): string[] => {
   return Array.from(new Set(matches));
 };
 
+const textContainsSourceCurrencyPrice = (text: string): boolean => {
+  return getSourceCurrencyPriceMatches(text).length > 0;
+};
+
 const parseSourceCurrencyPriceText = (text: string): number | null => {
   if (!textContainsSourceCurrency(text)) return null;
 
@@ -496,6 +491,28 @@ const parseSourceCurrencyPriceText = (text: string): number | null => {
   if (/\d/.test(remainingText)) return null;
 
   return parsePriceText(matches[0]);
+};
+
+const parseTrailingSourceCurrencyPriceText = (text: string): number | null => {
+  const numberPattern = "\\d[\\d\\s.,]*";
+
+  for (const token of getSourceCurrencyTokens()) {
+    const tokenPattern = getCurrencyTokenPattern(token);
+    const trailingPricePatterns = [
+      new RegExp(`(${numberPattern}\\s*${tokenPattern})\\s*$`, "i"),
+      new RegExp(`(${tokenPattern}\\s*${numberPattern})\\s*$`, "i"),
+    ];
+
+    for (const pattern of trailingPricePatterns) {
+      const match = text.match(pattern);
+      if (!match?.[1]) continue;
+
+      const price = parsePriceText(match[1]);
+      if (price !== null) return price;
+    }
+  }
+
+  return null;
 };
 
 const getMarketPriceCell = (element: HTMLElement): HTMLElement | null => {
@@ -628,21 +645,18 @@ const isElementVisible = (element: HTMLElement): boolean => {
 };
 
 const childContainsSourceCurrency = (element: HTMLElement): boolean => {
-  if (!valuteSign) return false;
-
   return Array.from(element.children).some(child => {
-    return getElementTextWithoutConvertedPrices(child as HTMLElement).includes(valuteSign as string);
+    return textContainsSourceCurrencyPrice(getElementTextWithoutConvertedPrices(child as HTMLElement));
   });
 };
 
 const isModernStorePriceLeaf = (element: HTMLElement): boolean => {
-  if (!valuteSign) return false;
   if (!isElementVisible(element)) return false;
   if (childContainsSourceCurrency(element)) return false;
   if (isOriginalDiscountPriceElement(element)) return false;
 
   const text = getElementTextWithoutConvertedPrices(element);
-  return text.includes(valuteSign) && parsePriceText(text) !== null;
+  return textContainsSourceCurrencyPrice(text) && parsePriceText(text) !== null;
 };
 
 const collectModernStoreSaleWidgetPriceElements = (widget: HTMLElement): HTMLElement[] => {
@@ -722,7 +736,7 @@ const isStorePurchaseDropdownPriceElement = (element: HTMLElement): boolean => {
   if (!element.closest("tr[role='button']")) return false;
 
   const text = getElementTextWithoutConvertedPrices(element);
-  return !!valuteSign && text.includes(valuteSign) && parseTrailingCurrencyPriceText(text) !== null;
+  return textContainsSourceCurrencyPrice(text) && parseTrailingSourceCurrencyPriceText(text) !== null;
 };
 
 const collectDynamicBundlePriceElements = (node: Node): HTMLElement[] => {
@@ -763,7 +777,7 @@ const isCartPriceElement = (element: HTMLElement): boolean => {
   if (element.children.length > 0) return false;
 
   const text = getElementTextWithoutConvertedPrices(element);
-  if (!text || !valuteSign || !text.includes(valuteSign)) return false;
+  if (!text || !textContainsSourceCurrencyPrice(text)) return false;
   if (parsePriceText(text) === null) return false;
 
   const parent = element.parentElement;
@@ -775,7 +789,7 @@ const isCartPriceElement = (element: HTMLElement): boolean => {
     if (isOriginalDiscountPriceElement(childElement)) return false;
 
     const childText = getElementTextWithoutConvertedPrices(childElement);
-    return !!childText && !!valuteSign && childText.includes(valuteSign) && parsePriceText(childText) !== null;
+    return !!childText && textContainsSourceCurrencyPrice(childText) && parsePriceText(childText) !== null;
   });
 
   if (priceChildren.length === 0) return false;
@@ -785,12 +799,12 @@ const isCartPriceElement = (element: HTMLElement): boolean => {
 
 const injectStandaloneMarketPrice = (element: HTMLElement, extraClassName: string = "") => {
   if (element.classList.contains("done")) return;
-  if (!currency || !valute || !valuteSign || valute === getTargetCurrency()) return;
+  if (!currency || !valute || valute === getTargetCurrency()) return;
 
   if (!getConversionRates()) return;
 
   const text = getElementTextWithoutConvertedPrices(element);
-  if (!text.includes(valuteSign)) return;
+  if (!textContainsSourceCurrencyPrice(text)) return;
 
   const price = getDataPriceFinal(element) ?? parsePriceText(text);
   if (!price) return;
@@ -850,7 +864,7 @@ const shouldUseDiscountedDynamicBundleStyle = (priceContainer: HTMLElement): boo
 
 const injectDynamicBundlePrice = (element: HTMLElement) => {
   if (element.classList.contains("steam-rub-dynamic-bundle-done")) return;
-  if (!currency || !valute || !valuteSign || valute === getTargetCurrency()) return;
+  if (!currency || !valute || valute === getTargetCurrency()) return;
   if (!getConversionRates()) return;
 
   const priceContainer = element.closest(".discount_block[data-price-final]") as HTMLElement | null;
@@ -870,7 +884,7 @@ const injectDynamicBundlePrice = (element: HTMLElement) => {
   span.textContent = `≈${formatted}`;
   const priceLine = Array.from(element.children).find(child => {
     const childElement = child as HTMLElement;
-    return !childElement.classList.contains("your_price_label") && childElement.textContent?.includes(valuteSign);
+    return !childElement.classList.contains("your_price_label") && textContainsSourceCurrencyPrice(childElement.textContent || "");
   }) as HTMLElement | undefined;
 
   withObserverPaused(() => {
@@ -882,13 +896,13 @@ const injectDynamicBundlePrice = (element: HTMLElement) => {
 
 const injectStorePurchaseDropdownPrice = (element: HTMLElement) => {
   if (element.classList.contains("done")) return;
-  if (!currency || !valute || !valuteSign || valute === getTargetCurrency()) return;
+  if (!currency || !valute || valute === getTargetCurrency()) return;
   if (!getConversionRates()) return;
 
   const text = getElementTextWithoutConvertedPrices(element);
-  if (!text.includes(valuteSign)) return;
+  if (!textContainsSourceCurrencyPrice(text)) return;
 
-  const price = parseTrailingCurrencyPriceText(text);
+  const price = parseTrailingSourceCurrencyPriceText(text);
   if (!price) return;
 
   const formatted = formatConvertedPrice(price);
@@ -906,11 +920,11 @@ const injectStorePurchaseDropdownPrice = (element: HTMLElement) => {
 
 const injectModernStorePrice = (element: HTMLElement) => {
   if (element.classList.contains("done")) return;
-  if (!currency || !valute || !valuteSign || valute === getTargetCurrency()) return;
+  if (!currency || !valute || valute === getTargetCurrency()) return;
   if (!getConversionRates()) return;
 
   const text = getElementTextWithoutConvertedPrices(element);
-  if (!text.includes(valuteSign)) return;
+  if (!textContainsSourceCurrencyPrice(text)) return;
 
   const price = parsePriceText(text);
   if (!price) return;
@@ -930,11 +944,11 @@ const injectModernStorePrice = (element: HTMLElement) => {
 
 const injectCartPrice = (element: HTMLElement) => {
   if (element.classList.contains("done")) return;
-  if (!currency || !valute || !valuteSign || valute === getTargetCurrency()) return;
+  if (!currency || !valute || valute === getTargetCurrency()) return;
   if (!getConversionRates()) return;
 
   const text = getElementTextWithoutConvertedPrices(element);
-  if (!text.includes(valuteSign)) return;
+  if (!textContainsSourceCurrencyPrice(text)) return;
 
   const price = getDataPriceFinal(element) ?? parsePriceText(text);
   if (!price) return;
@@ -954,7 +968,7 @@ const injectCartPrice = (element: HTMLElement) => {
 
 const injectMarketPrice = (cell: HTMLElement) => {
   if (cell.classList.contains("steam-rub-market-done")) return;
-  if (!currency || !valute || !valuteSign || valute === getTargetCurrency()) return;
+  if (!currency || !valute || valute === getTargetCurrency()) return;
 
   if (!getConversionRates()) return;
 
@@ -967,7 +981,7 @@ const injectMarketPrice = (cell: HTMLElement) => {
   const valueContainer = cell.querySelector(".market_table_value") as HTMLElement || cell;
   const priceElement = valueContainer.querySelector(".normal_price[data-price], .normal_price:not(.market_table_value)") as HTMLElement || valueContainer;
   const text = getElementTextWithoutConvertedPrices(priceElement);
-  if (!text.includes(valuteSign)) return;
+  if (!textContainsSourceCurrencyPrice(text)) return;
 
   const price = getDataPriceFinal(priceElement) ?? parsePriceText(text);
   if (!price) return;
@@ -1049,7 +1063,7 @@ const grabCurrentCurrency = async (): Promise<boolean> => {
 
 // --- Price Injection ---
 const injectPrice = (element: HTMLElement) => {
-  if (!currency || !valute || !valuteSign) return;
+  if (!currency || !valute) return;
 
   if (isBetaMarketPriceElement(element)) {
     injectBetaMarketPrice(element);
@@ -1111,7 +1125,7 @@ const injectPrice = (element: HTMLElement) => {
     if (isOriginalDiscountPriceElement(c as HTMLElement)) return false;
 
     const t = c.textContent || "";
-    return t.includes(valuteSign as string);
+    return textContainsSourceCurrencyPrice(t);
   });
   if (childrenWithSign.length > 0) {
     childrenWithSign.forEach(c => {
@@ -1122,7 +1136,7 @@ const injectPrice = (element: HTMLElement) => {
   }
 
   // Skip if this element doesn't directly contain a recognizable price signal.
-  if (!text.includes(valuteSign) && dataPriceFinal === null) return;
+  if (!textContainsSourceCurrencyPrice(text) && dataPriceFinal === null) return;
   // Skip native target currency or excluded classes
   if (valute === getTargetCurrency()) return;
   if (hasDirectChildClass(element, "your_price_label")) return;
@@ -1449,7 +1463,7 @@ const scheduleStartupRetry = () => {
   startupRetryTimer = window.setInterval(async () => {
     startupRetryCount += 1;
 
-    if (!valute || !valuteSign) {
+    if (!valute) {
       await grabCurrentCurrency();
     }
 
