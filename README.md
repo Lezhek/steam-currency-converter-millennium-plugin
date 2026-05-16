@@ -65,7 +65,6 @@ In the plugin settings, you can:
 Exchange rates are updated automatically every 30 minutes.
 
 
-
 ## Скриншоты | Screenshots
 
 ### Магазин Steam | Steam Store

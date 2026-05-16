@@ -281,6 +281,33 @@ const parsePriceText = (text: string): number | null => {
   return price && !isNaN(price) ? price : null;
 };
 
+const escapeRegExp = (value: string): string => {
+  return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+};
+
+const parseTrailingCurrencyPriceText = (text: string): number | null => {
+  if (!valuteSign) return null;
+
+  const escapedSign = escapeRegExp(valuteSign.trim());
+  if (!escapedSign) return null;
+
+  const numberPattern = "\\d[\\d\\s.,]*";
+  const trailingPricePatterns = [
+    new RegExp(`(${numberPattern}\\s*${escapedSign})\\s*$`),
+    new RegExp(`(${escapedSign}\\s*${numberPattern})\\s*$`),
+  ];
+
+  for (const pattern of trailingPricePatterns) {
+    const match = text.match(pattern);
+    if (!match?.[1]) continue;
+
+    const price = parsePriceText(match[1]);
+    if (price !== null) return price;
+  }
+
+  return null;
+};
+
 const getElementTextWithoutConvertedPrices = (element: HTMLElement): string => {
   const clone = element.cloneNode(true) as HTMLElement;
   clone.querySelectorAll(".steam-rub-price").forEach(el => el.remove());
@@ -324,6 +351,7 @@ const isOwnPriceMutation = (mutation: MutationRecord): boolean => {
 };
 
 const dynamicBundlePriceSelector = ".dynamic_bundle_description .discount_block[data-price-final] .discount_final_price";
+const storePurchaseDropdownPriceSelector = ".game_area_purchase_game_dropdown_menu_container .game_area_purchase_game_dropdown_menu_item_text";
 
 const roundConvertedAmount = (amount: number, currencyCode: string): number => {
   const fractionDigits = getDisplayFractionDigits(currencyCode);
@@ -429,6 +457,16 @@ const isMarketRecentListingPriceElement = (element: HTMLElement): boolean => {
 
 const isDynamicBundlePriceElement = (element: HTMLElement): boolean => {
   return element.closest(".dynamic_bundle_description") !== null;
+};
+
+const isStorePurchaseDropdownPriceElement = (element: HTMLElement): boolean => {
+  if (!location.pathname.startsWith("/app/")) return false;
+  if (!element.matches(storePurchaseDropdownPriceSelector)) return false;
+  if (!element.closest(".game_area_purchase")) return false;
+  if (!element.closest("tr[role='button']")) return false;
+
+  const text = getElementTextWithoutConvertedPrices(element);
+  return !!valuteSign && text.includes(valuteSign) && parseTrailingCurrencyPriceText(text) !== null;
 };
 
 const collectDynamicBundlePriceElements = (node: Node): HTMLElement[] => {
@@ -563,6 +601,30 @@ const injectDynamicBundlePrice = (element: HTMLElement) => {
   });
 };
 
+const injectStorePurchaseDropdownPrice = (element: HTMLElement) => {
+  if (element.classList.contains("done")) return;
+  if (!currency || !valute || !valuteSign || valute === getTargetCurrency()) return;
+  if (!getConversionRates()) return;
+
+  const text = getElementTextWithoutConvertedPrices(element);
+  if (!text.includes(valuteSign)) return;
+
+  const price = parseTrailingCurrencyPriceText(text);
+  if (!price) return;
+
+  const formatted = formatConvertedPrice(price);
+  if (!formatted) return;
+
+  const span = document.createElement("span");
+  span.className = "steam-rub-price steam-rub-dropdown-price";
+  span.textContent = `≈${formatted}`;
+
+  withObserverPaused(() => {
+    element.classList.add("done", "steam-rub-dropdown-price-source");
+    element.appendChild(span);
+  });
+};
+
 const injectCartPrice = (element: HTMLElement) => {
   if (element.classList.contains("done")) return;
   if (!currency || !valute || !valuteSign || valute === getTargetCurrency()) return;
@@ -675,6 +737,11 @@ const injectPrice = (element: HTMLElement) => {
 
   if (isDynamicBundlePriceElement(element)) return;
   if (isOriginalDiscountPriceElement(element)) return;
+
+  if (isStorePurchaseDropdownPriceElement(element)) {
+    injectStorePurchaseDropdownPrice(element);
+    return;
+  }
 
   if (isCartPriceElement(element)) {
     injectCartPrice(element);
@@ -791,6 +858,7 @@ const targetSelectors = [
   ".game_purchase_price",
   ".game_purchase_action .game_purchase_price",
   ".game_purchase_action_bg .game_purchase_price",
+  storePurchaseDropdownPriceSelector,
   ".discount_final_price",
   ".search_price",
   ".price:not(.spotlight_body):not(.similar_grid_price):not(.discount_original_price)",
@@ -1036,6 +1104,7 @@ const resetConvertedPrices = () => {
     document.querySelectorAll(".steam-rub-price").forEach(el => el.remove());
     document.querySelectorAll(".done").forEach(el => el.classList.remove("done"));
     document.querySelectorAll(".steam-rub-cart-price-source").forEach(el => el.classList.remove("steam-rub-cart-price-source"));
+    document.querySelectorAll(".steam-rub-dropdown-price-source").forEach(el => el.classList.remove("steam-rub-dropdown-price-source"));
     document.querySelectorAll(".steam-rub-market-done").forEach(el => el.classList.remove("steam-rub-market-done"));
     document.querySelectorAll(".steam-rub-market-price-source").forEach(el => el.classList.remove("steam-rub-market-price-source"));
     document.querySelectorAll(".steam-rub-dynamic-bundle-done").forEach(el => el.classList.remove("steam-rub-dynamic-bundle-done"));
@@ -1246,6 +1315,16 @@ export default function WebkitMain() {
     }
     .dynamic_bundle_description .steam-rub-dynamic-bundle-line {
       white-space: nowrap !important;
+    }
+    .game_area_purchase_game_dropdown_menu_item_text .steam-rub-dropdown-price {
+      margin-left: 6px !important;
+      color: #8f98a0 !important;
+      font-size: 11px !important;
+      font-weight: normal !important;
+      line-height: inherit !important;
+    }
+    .game_area_purchase_game_dropdown_selection .steam-rub-dropdown-price {
+      display: none !important;
     }
     .steam-rub-price.is-market-price {
       display: inline !important;
