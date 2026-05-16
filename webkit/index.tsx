@@ -697,9 +697,21 @@ const getMarketPriceCell = (element: HTMLElement): HTMLElement | null => {
   ) as HTMLElement | null;
 };
 
+const getVisibleOldMarketListingPrice = (cell: HTMLElement): HTMLElement | null => {
+  const price = (
+    cell.matches(".market_listing_price_with_fee")
+      ? cell
+      : cell.querySelector(".market_listing_price_with_fee")
+  ) as HTMLElement | null;
+  if (!price || !isElementVisible(price)) return null;
+
+  return price;
+};
+
 const isMarketCommodityPriceElement = (element: HTMLElement): boolean => {
   return (
     element.matches(".market_commodity_order_summary .market_commodity_orders_header_promote") ||
+    element.matches("#market_commodity_buyrequests .market_commodity_orders_header_promote") ||
     element.matches(".market_commodity_orders_table td:first-child")
   );
 };
@@ -1155,7 +1167,10 @@ const injectMarketPrice = (cell: HTMLElement) => {
   });
 
   const valueContainer = cell.querySelector(".market_table_value") as HTMLElement || cell;
-  const priceElement = valueContainer.querySelector(".normal_price[data-price], .normal_price:not(.market_table_value)") as HTMLElement || valueContainer;
+  const priceElement =
+    getVisibleOldMarketListingPrice(cell) ||
+    valueContainer.querySelector(".normal_price[data-price], .normal_price:not(.market_table_value)") as HTMLElement ||
+    valueContainer;
   const text = getElementTextWithoutConvertedPrices(priceElement);
   if (!textContainsSourceCurrencyPrice(text)) return;
 
@@ -1524,11 +1539,13 @@ const targetSelectors = [
   ".wht_total",
   ".normal_price:not(.market_table_value)",
   ".sale_price",
+  "#searchResultsRows .market_listing_price_with_fee",
   "#tabContentsMyListings .market_listing_price span[title]",
   "#sellListingsTable .market_listing_price_with_fee",
   "#soldListingTable .market_listing_price_with_fee",
   "#tabContentsMyMarketHistory .market_listing_price",
   ".market_commodity_order_summary .market_commodity_orders_header_promote",
+  "#market_commodity_buyrequests .market_commodity_orders_header_promote",
   ".market_commodity_orders_table td:first-child",
 ];
 
@@ -2091,6 +2108,14 @@ export default function WebkitMain() {
     .market_commodity_order_summary .steam-rub-market-price-source,
     .market_commodity_orders_table .steam-rub-market-price-source {
       white-space: nowrap !important;
+    }
+    .market_commodity_orders_table td:first-child .steam-rub-price.is-market-commodity-price {
+      display: block !important;
+      margin-left: 0 !important;
+      margin-top: 1px !important;
+      font-size: 0.92em !important;
+      line-height: 1.1 !important;
+      text-align: center !important;
     }
     .discount_final_price, .game_purchase_price,
     .game_purchase_action .sale_price,
