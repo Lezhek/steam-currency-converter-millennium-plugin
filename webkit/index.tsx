@@ -97,6 +97,8 @@ const pendingBetaMarketChartTooltips = new Set<HTMLElement>();
 let pendingBetaMarketChartTooltipFrame: number | null = null;
 const pendingClassicMarketGraphTooltips = new Set<HTMLElement>();
 let pendingClassicMarketGraphTooltipFrame: number | null = null;
+const pendingInventorySellPriceInputs = new Set<HTMLInputElement>();
+let pendingInventorySellPriceInputTimer: number | null = null;
 
 const rateFetchTimeoutMs = 10000;
 const rateFetchRetryMs = 15000;
@@ -384,6 +386,9 @@ const classicMarketGraphRootSelector = "#pricehistory.jqplot-target";
 const classicMarketGraphTooltipSelector = "#pricehistory .jqplot-highlighter-tooltip";
 const classicMarketOrderGraphRootSelector = "#orders_histogram.jqplot-target";
 const classicMarketOrderGraphTooltipSelector = "#orders_histogram .jqplot-highlighter-tooltip";
+const inventoryItemInfoSelector = "#iteminfo0, #iteminfo1";
+const inventorySellDialogSelector = "#market_sell_dialog";
+const inventorySellPriceInputSelector = "#market_sell_currency_input, #market_sell_buyercurrency_input";
 
 const roundConvertedAmount = (amount: number, currencyCode: string): number => {
   const fractionDigits = getDisplayFractionDigits(currencyCode);
@@ -767,26 +772,45 @@ const isCommunityMarketPage = (): boolean => {
   return window.location.hostname.includes("steamcommunity.com") && window.location.pathname.startsWith("/market");
 };
 
+const isCommunityInventoryPage = (): boolean => {
+  return (
+    window.location.hostname.includes("steamcommunity.com") &&
+    (window.location.pathname.includes("/inventory") || window.g_bIsInventoryPage === true)
+  );
+};
+
 const isBetaCommunityMarketPage = (): boolean => {
   return isCommunityMarketPage() && document.querySelector(betaMarketRootSelector) !== null;
 };
 
 const isClassicMarketItemGraphPage = (): boolean => {
-  return (
+  const hasClassicMarketListingGraph =
     isCommunityMarketPage() &&
     window.location.pathname.startsWith("/market/listings/") &&
     document.querySelector(betaMarketRootSelector) === null &&
     (
       document.querySelector(classicMarketGraphRootSelector) !== null ||
       document.querySelector(classicMarketOrderGraphRootSelector) !== null
-    )
-  );
+    );
+
+  const hasInventorySellDialogGraph =
+    isCommunityInventoryPage() &&
+    document.querySelector(`${inventorySellDialogSelector} ${classicMarketGraphRootSelector}`) !== null;
+
+  return hasClassicMarketListingGraph || hasInventorySellDialogGraph;
 };
 
 const isIgnoredBetaMarketPriceContext = (element: HTMLElement): boolean => {
   return !!element.closest(
     ".steam-rub-price, svg, canvas, script, style, input, textarea, select, option, template, noscript, " +
     ".recharts-wrapper, .recharts-surface, [class*='recharts']"
+  );
+};
+
+const isIgnoredInventoryPriceContext = (element: HTMLElement): boolean => {
+  return !!element.closest(
+    ".steam-rub-price, svg, canvas, script, style, input, textarea, select, option, template, noscript, " +
+    "button, a, #market_sell_dialog, .jqplot-target, .jqplot-axis, .jqplot-highlighter-tooltip"
   );
 };
 
@@ -840,6 +864,47 @@ const collectBetaMarketPriceElements = (node: Node): HTMLElement[] => {
 
 const isBetaMarketPriceElement = (element: HTMLElement): boolean => {
   return isBetaMarketPriceLeaf(element);
+};
+
+const isInventoryItemPriceLeaf = (element: HTMLElement): boolean => {
+  if (!isCommunityInventoryPage()) return false;
+  if (element.classList.contains("done") && hasDirectConvertedPrice(element)) return false;
+  if (!element.closest(inventoryItemInfoSelector)) return false;
+  if (!element.matches("span, div")) return false;
+  if (!isElementVisible(element)) return false;
+  if (isIgnoredInventoryPriceContext(element)) return false;
+  if (childContainsSourceCurrencyToken(element)) return false;
+
+  const text = getElementTextWithoutConvertedPrices(element);
+  if (!text || text.length > 160) return false;
+  if (textContainsConflictingCurrencyPrice(text)) return false;
+
+  return parseSourceCurrencyPriceText(text) !== null;
+};
+
+const collectInventoryItemPriceElements = (node: Node): HTMLElement[] => {
+  if (!isCommunityInventoryPage()) return [];
+
+  const element = node.nodeType === Node.ELEMENT_NODE ? node as HTMLElement : node.parentElement;
+  if (!element) return [];
+
+  const priceElements = new Set<HTMLElement>();
+
+  if (isInventoryItemPriceLeaf(element)) {
+    priceElements.add(element);
+  }
+
+  element.querySelectorAll?.("span, div").forEach(candidate => {
+    if (candidate instanceof HTMLElement && isInventoryItemPriceLeaf(candidate)) {
+      priceElements.add(candidate);
+    }
+  });
+
+  return Array.from(priceElements);
+};
+
+const isInventoryItemPriceElement = (element: HTMLElement): boolean => {
+  return isInventoryItemPriceLeaf(element);
 };
 
 const isDynamicBundlePriceElement = (element: HTMLElement): boolean => {
@@ -1285,6 +1350,115 @@ const injectBetaMarketPrice = (element: HTMLElement) => {
   });
 };
 
+const injectInventoryItemPrice = (element: HTMLElement) => {
+  if (element.classList.contains("done") && hasDirectConvertedPrice(element)) return;
+  if (!currency || !valute || valute === getTargetCurrency()) return;
+  if (!getConversionRates()) return;
+
+  const text = getElementTextWithoutConvertedPrices(element);
+  const price = parseSourceCurrencyPriceText(text);
+  if (!price) return;
+
+  const formatted = formatConvertedPrice(price);
+  if (!formatted) return;
+
+  const span = document.createElement("span");
+  span.className = "steam-rub-price steam-rub-inventory-price";
+  span.textContent = `≈${formatted}`;
+
+  withObserverPaused(() => {
+    element.querySelectorAll(".steam-rub-inventory-price").forEach(el => el.remove());
+    element.classList.add("done", "steam-rub-inventory-price-source");
+    element.appendChild(span);
+  });
+};
+
+const isInventorySellPriceInput = (element: HTMLElement): element is HTMLInputElement => {
+  if (!isCommunityInventoryPage()) return false;
+  if (!(element instanceof HTMLInputElement)) return false;
+  if (!element.matches(inventorySellPriceInputSelector)) return false;
+  if (!element.closest(inventorySellDialogSelector)) return false;
+  return isElementVisible(element);
+};
+
+const collectInventorySellPriceInputs = (node: Node): HTMLInputElement[] => {
+  if (!isCommunityInventoryPage()) return [];
+
+  const element = node.nodeType === Node.ELEMENT_NODE ? node as HTMLElement : node.parentElement;
+  if (!element) return [];
+
+  const inputs = new Set<HTMLInputElement>();
+
+  if (isInventorySellPriceInput(element)) {
+    inputs.add(element);
+  }
+
+  element.querySelectorAll?.(inventorySellPriceInputSelector).forEach(candidate => {
+    if (candidate instanceof HTMLElement && isInventorySellPriceInput(candidate)) {
+      inputs.add(candidate);
+    }
+  });
+
+  return Array.from(inputs);
+};
+
+const removeInventorySellInputPrice = (input: HTMLInputElement) => {
+  const sourceInput = input.id;
+  if (!sourceInput) return;
+
+  const root = input.closest(inventorySellDialogSelector) || input.parentElement;
+  root?.querySelectorAll(".steam-rub-inventory-sell-input-price").forEach(helper => {
+    if ((helper as HTMLElement).dataset.sourceInput === sourceInput) {
+      helper.remove();
+    }
+  });
+};
+
+const parseInventorySellInputAmount = (input: HTMLInputElement): number | null => {
+  const text = input.value.trim();
+  if (!/\d/.test(text)) return null;
+
+  return parsePriceText(text);
+};
+
+const injectInventorySellInputPrice = (input: HTMLInputElement) => {
+  withObserverPaused(() => {
+    removeInventorySellInputPrice(input);
+  });
+
+  if (!currency || !valute || valute === getTargetCurrency()) return;
+  if (!getConversionRates()) return;
+
+  const price = parseInventorySellInputAmount(input);
+  if (!price) return;
+
+  const formatted = formatConvertedPrice(price);
+  if (!formatted) return;
+
+  const span = document.createElement("span");
+  span.className = "steam-rub-price steam-rub-inventory-sell-input-price";
+  span.dataset.sourceInput = input.id;
+  span.textContent = `≈${formatted}`;
+
+  withObserverPaused(() => {
+    input.classList.add("steam-rub-inventory-sell-input-source");
+    input.insertAdjacentElement("afterend", span);
+  });
+};
+
+const enqueueInventorySellPriceInput = (input: HTMLInputElement) => {
+  pendingInventorySellPriceInputs.add(input);
+
+  if (pendingInventorySellPriceInputTimer !== null) return;
+
+  pendingInventorySellPriceInputTimer = window.setTimeout(() => {
+    pendingInventorySellPriceInputTimer = null;
+    const inputs = Array.from(pendingInventorySellPriceInputs);
+    pendingInventorySellPriceInputs.clear();
+    inputs.forEach(injectInventorySellInputPrice);
+  }, getProcessQueueDelay());
+};
+
 const resetDynamicBundlePrice = (element: HTMLElement) => {
   withObserverPaused(() => {
     element.querySelectorAll(".steam-rub-dynamic-bundle-price").forEach(el => el.remove());
@@ -1704,6 +1878,11 @@ const injectPrice = (element: HTMLElement) => {
     return;
   }
 
+  if (isInventoryItemPriceElement(element)) {
+    injectInventoryItemPrice(element);
+    return;
+  }
+
   if (element.classList.contains("done")) return;
 
   if (isDynamicBundlePriceElement(element)) return;
@@ -1913,6 +2092,19 @@ const processFullPage = () => {
     injectBetaMarketPrice(el);
   });
 
+  collectInventoryItemPriceElements(document.body).forEach(el => {
+    if (!isReady) {
+      if (!initialQueue.includes(el)) initialQueue.push(el);
+      return;
+    }
+
+    injectInventoryItemPrice(el);
+  });
+
+  if (isReady) {
+    collectInventorySellPriceInputs(document.body).forEach(enqueueInventorySellPriceInput);
+  }
+
   if (isReady) {
     processVisibleBetaMarketChartTooltips();
     processVisibleClassicMarketGraphTooltips();
@@ -2012,6 +2204,15 @@ const findProcessableElement = (node: Node): HTMLElement | null => {
     return betaMarketPrice;
   }
 
+  if (isInventoryItemPriceElement(element)) {
+    return element;
+  }
+
+  const inventoryItemPrice = collectInventoryItemPriceElements(element)[0];
+  if (inventoryItemPrice) {
+    return inventoryItemPrice;
+  }
+
   if (element.matches && matchesAnyTargetSelector(element)) {
     return element;
   }
@@ -2024,6 +2225,7 @@ const handleMutations = (mutations: MutationRecord[]) => {
 
   const toProcess = new Set<HTMLElement>();
   const dynamicBundlePricesToProcess = new Set<HTMLElement>();
+  const inventorySellInputsToProcess = new Set<HTMLInputElement>();
 
   for (const mutation of mutations) {
     if (isOwnPriceMutation(mutation)) {
@@ -2043,6 +2245,14 @@ const handleMutations = (mutations: MutationRecord[]) => {
     collectBetaMarketPriceElements(mutation.target).forEach(el => {
       toProcess.add(el);
     });
+    collectInventoryItemPriceElements(mutation.target).forEach(el => {
+      toProcess.add(el);
+    });
+    if (isReady) {
+      collectInventorySellPriceInputs(mutation.target).forEach(input => {
+        inventorySellInputsToProcess.add(input);
+      });
+    }
 
     if (mutation.type === 'characterData' || mutation.type === 'attributes') {
       const target = findProcessableElement(mutation.target);
@@ -2057,6 +2267,7 @@ const handleMutations = (mutations: MutationRecord[]) => {
           target.classList.remove("done");
           target.classList.remove("steam-rub-cart-price-source");
           target.classList.remove("steam-rub-beta-market-price-source");
+          target.classList.remove("steam-rub-inventory-price-source");
           target.querySelectorAll(".steam-rub-price").forEach(el => el.remove());
         });
         if (isDynamicBundlePriceElement(target)) {
@@ -2085,6 +2296,14 @@ const handleMutations = (mutations: MutationRecord[]) => {
         collectBetaMarketPriceElements(el).forEach(priceElement => {
           toProcess.add(priceElement);
         });
+        collectInventoryItemPriceElements(el).forEach(priceElement => {
+          toProcess.add(priceElement);
+        });
+        if (isReady) {
+          collectInventorySellPriceInputs(el).forEach(input => {
+            inventorySellInputsToProcess.add(input);
+          });
+        }
         if (isReady) {
           collectBetaMarketChartTooltips(el).forEach(enqueueBetaMarketChartTooltip);
           collectClassicMarketGraphTooltips(el).forEach(enqueueClassicMarketGraphTooltip);
@@ -2112,6 +2331,7 @@ const handleMutations = (mutations: MutationRecord[]) => {
   }
 
   dynamicBundlePricesToProcess.forEach(el => enqueueDynamicBundlePriceElement(el));
+  inventorySellInputsToProcess.forEach(input => enqueueInventorySellPriceInput(input));
   toProcess.forEach(el => enqueueProcessElement(el));
 };
 
@@ -2134,6 +2354,16 @@ const handleClassicMarketGraphPointerMove = (event: Event) => {
   ) return;
 
   processVisibleClassicMarketGraphTooltips();
+};
+
+const handleInventorySellPriceInputEvent = (event: Event) => {
+  if (!isReady || !isCommunityInventoryPage()) return;
+
+  const target = event.target instanceof HTMLElement ? event.target : null;
+  if (!target || !isInventorySellPriceInput(target)) return;
+
+  collectInventorySellPriceInputs(target.closest(inventorySellDialogSelector) || document.body)
+    .forEach(enqueueInventorySellPriceInput);
 };
 
 const clearStartupRetryTimer = () => {
@@ -2189,6 +2419,8 @@ const resetConvertedPrices = () => {
     document.querySelectorAll(".steam-rub-market-done").forEach(el => el.classList.remove("steam-rub-market-done"));
     document.querySelectorAll(".steam-rub-market-price-source").forEach(el => el.classList.remove("steam-rub-market-price-source"));
     document.querySelectorAll(".steam-rub-beta-market-price-source").forEach(el => el.classList.remove("steam-rub-beta-market-price-source"));
+    document.querySelectorAll(".steam-rub-inventory-price-source").forEach(el => el.classList.remove("steam-rub-inventory-price-source"));
+    document.querySelectorAll(".steam-rub-inventory-sell-input-source").forEach(el => el.classList.remove("steam-rub-inventory-sell-input-source"));
     document.querySelectorAll(".steam-rub-dynamic-bundle-done").forEach(el => el.classList.remove("steam-rub-dynamic-bundle-done"));
   });
   processFullPage();
@@ -2359,6 +2591,8 @@ const startConverter = (): boolean => {
   document.addEventListener("mousemove", handleBetaMarketChartPointerMove, true);
   document.addEventListener("pointermove", handleClassicMarketGraphPointerMove, true);
   document.addEventListener("mousemove", handleClassicMarketGraphPointerMove, true);
+  document.addEventListener("input", handleInventorySellPriceInputEvent, true);
+  document.addEventListener("change", handleInventorySellPriceInputEvent, true);
 
   initializePlugin();
   return true;
@@ -2463,6 +2697,29 @@ export default function WebkitMain() {
     }
     .steam-rub-beta-market-price-source {
       white-space: nowrap !important;
+    }
+    .steam-rub-inventory-price {
+      display: inline !important;
+      margin-left: 5px !important;
+      color: inherit !important;
+      font-size: inherit !important;
+      font-weight: inherit !important;
+      line-height: inherit !important;
+      white-space: nowrap !important;
+      vertical-align: baseline !important;
+    }
+    .steam-rub-inventory-price-source {
+      white-space: nowrap !important;
+    }
+    .steam-rub-inventory-sell-input-price {
+      display: inline-block !important;
+      margin-left: 8px !important;
+      color: #c7d5e0 !important;
+      font-size: 12px !important;
+      font-weight: 400 !important;
+      line-height: 22px !important;
+      white-space: nowrap !important;
+      vertical-align: top !important;
     }
     .steam-rub-chart-tooltip-price {
       display: block !important;
