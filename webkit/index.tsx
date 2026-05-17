@@ -97,6 +97,7 @@ let pendingDynamicBundlePriceTimer: number | null = null;
 const rateFetchTimeoutMs = 10000;
 const rateFetchRetryMs = 15000;
 const ratesCacheStorageKey = "steam-rub-converter:last-good-rates";
+const sourceCurrencySessionStorageKey = "steam-rub-converter:session-source-currency";
 
 type RateSource = "freedom" | "exchange_api";
 
@@ -1217,13 +1218,51 @@ const sourceCurrencyFromSessionPayload = (payload: any): SourceCurrencyDetection
   };
 };
 
+const readStoredSessionSourceCurrency = (): SourceCurrencyDetection | null => {
+  try {
+    const raw = window.sessionStorage?.getItem(sourceCurrencySessionStorageKey);
+    if (!raw) return null;
+
+    return sourceCurrencyFromSessionPayload(JSON.parse(raw));
+  } catch (_) {
+    return null;
+  }
+};
+
+const storeSessionSourceCurrency = (detection: SourceCurrencyDetection | null) => {
+  if (!detection) return;
+
+  try {
+    window.sessionStorage?.setItem(sourceCurrencySessionStorageKey, JSON.stringify({
+      currency: detection.currency,
+      sign: detection.sign || getDefaultCurrencySign(detection.currency) || "",
+      detector: detection.detector,
+      confidence: detection.confidence,
+    }));
+  } catch (_) { }
+};
+
 const loadSessionSourceCurrency = async (): Promise<boolean> => {
   if (valute && valuteSign) return true;
+
+  const storedSource = readStoredSessionSourceCurrency();
+  if (storedSource && applySourceCurrency(storedSource.currency, storedSource.sign, "session-cache")) {
+    void GetSessionSourceCurrency()
+      .then(response => {
+        const backendSource = sourceCurrencyFromSessionPayload(parseCallableResponse(response));
+        if (backendSource) {
+          storeSessionSourceCurrency(backendSource);
+        }
+      })
+      .catch(() => { });
+    return true;
+  }
 
   try {
     const response = parseCallableResponse(await GetSessionSourceCurrency());
     const cachedSource = sourceCurrencyFromSessionPayload(response);
     if (cachedSource && applySourceCurrency(cachedSource.currency, cachedSource.sign, "session-cache")) {
+      storeSessionSourceCurrency(cachedSource);
       console.log(`[Steam RUB Converter] Currency via session cache: ${valute} (${valuteSign})`);
       return true;
     }
@@ -1235,6 +1274,33 @@ const loadSessionSourceCurrency = async (): Promise<boolean> => {
 };
 
 const lockSessionSourceCurrency = async (detection: SourceCurrencyDetection): Promise<boolean> => {
+  if (applySourceCurrency(detection.currency, detection.sign, detection.detector)) {
+    storeSessionSourceCurrency(detection);
+
+    void SetSessionSourceCurrencyOnce({
+      currency: JSON.stringify({
+        currency: detection.currency,
+        sign: detection.sign || getDefaultCurrencySign(detection.currency) || "",
+        detector: detection.detector,
+        confidence: detection.confidence,
+        url: window.location.href,
+      }),
+    })
+      .then(response => {
+        const parsedResponse = parseCallableResponse(response);
+        const sessionSource = sourceCurrencyFromSessionPayload(parsedResponse);
+        if (sessionSource) {
+          storeSessionSourceCurrency(sessionSource);
+        }
+        console.log(`[Steam RUB Converter] Currency via ${parsedResponse?.locked ? detection.detector : "session cache"}: ${sessionSource?.currency || valute} (${sessionSource?.sign || valuteSign})`);
+      })
+      .catch(e => {
+        console.warn("[Steam RUB Converter] Failed to lock session source currency; using local page value only:", e);
+      });
+
+    return true;
+  }
+
   try {
     const response = parseCallableResponse(await SetSessionSourceCurrencyOnce({
       currency: JSON.stringify({
@@ -1248,6 +1314,7 @@ const lockSessionSourceCurrency = async (detection: SourceCurrencyDetection): Pr
 
     const sessionSource = sourceCurrencyFromSessionPayload(response);
     if (sessionSource && applySourceCurrency(sessionSource.currency, sessionSource.sign, response?.locked ? detection.detector : "session-cache")) {
+      storeSessionSourceCurrency(sessionSource);
       console.log(`[Steam RUB Converter] Currency via ${response?.locked ? detection.detector : "session cache"}: ${valute} (${valuteSign})`);
       return true;
     }
@@ -1609,6 +1676,14 @@ const processFullPage = () => {
   });
 };
 
+const hasConvertedPrices = (): boolean => {
+  return document.querySelector(".steam-rub-price") !== null;
+};
+
+const getProcessQueueDelay = (): number => {
+  return isReady && !hasConvertedPrices() ? 0 : 50;
+};
+
 const enqueueProcessElement = (element: HTMLElement) => {
   pendingProcessElements.add(element);
 
@@ -1619,7 +1694,7 @@ const enqueueProcessElement = (element: HTMLElement) => {
     const elements = Array.from(pendingProcessElements);
     pendingProcessElements.clear();
     elements.forEach(el => processElement(el));
-  }, 50);
+  }, getProcessQueueDelay());
 };
 
 const enqueueDynamicBundlePriceElement = (element: HTMLElement) => {
@@ -1635,7 +1710,7 @@ const enqueueDynamicBundlePriceElement = (element: HTMLElement) => {
       resetDynamicBundlePrice(el);
       injectDynamicBundlePrice(el);
     });
-  }, 50);
+  }, getProcessQueueDelay());
 };
 
 const matchesAnyTargetSelector = (element: HTMLElement): boolean => {
@@ -1780,10 +1855,18 @@ const handleMutations = (mutations: MutationRecord[]) => {
   toProcess.forEach(el => enqueueProcessElement(el));
 };
 
+const clearStartupRetryTimer = () => {
+  if (startupRetryTimer === null) return;
+
+  window.clearTimeout(startupRetryTimer);
+  startupRetryTimer = null;
+};
+
 const scheduleStartupRetry = () => {
   if (startupRetryTimer !== null) return;
 
-  startupRetryTimer = window.setInterval(async () => {
+  const runRetry = async () => {
+    startupRetryTimer = null;
     startupRetryCount += 1;
 
     if (!valute) {
@@ -1792,14 +1875,15 @@ const scheduleStartupRetry = () => {
 
     processFullPage();
 
-    const hasConvertedPrices = document.querySelector(".steam-rub-price") !== null;
-    if ((valute === getTargetCurrency()) || hasConvertedPrices || startupRetryCount >= 20) {
-      if (startupRetryTimer !== null) {
-        window.clearInterval(startupRetryTimer);
-        startupRetryTimer = null;
-      }
+    if ((valute === getTargetCurrency()) || hasConvertedPrices() || startupRetryCount >= 20) {
+      return;
     }
-  }, 1000);
+
+    const nextDelay = startupRetryCount < 10 ? 150 : 1000;
+    startupRetryTimer = window.setTimeout(runRetry, nextDelay);
+  };
+
+  startupRetryTimer = window.setTimeout(runRetry, 100);
 };
 
 const getSettingsKey = (rates: any): string => {
@@ -1812,6 +1896,9 @@ const hasRatePayload = (rates: any): boolean => {
 };
 
 const resetConvertedPrices = () => {
+  clearStartupRetryTimer();
+  startupRetryCount = 0;
+
   withObserverPaused(() => {
     document.querySelectorAll(".steam-rub-price").forEach(el => el.remove());
     document.querySelectorAll(".done").forEach(el => el.classList.remove("done"));
@@ -1894,6 +1981,24 @@ const loadCachedRates = async () => {
   }
 };
 
+const refreshCachedRatesInBackground = () => {
+  void loadCachedRates()
+    .then(nextCurrency => {
+      const nextSettingsKey = getSettingsKey(nextCurrency);
+      if (nextSettingsKey === currentSettingsKey && (hasRatePayload(currency) || !hasRatePayload(nextCurrency))) return;
+
+      currency = nextCurrency;
+      currentSettingsKey = nextSettingsKey;
+
+      if (isReady) {
+        resetConvertedPrices();
+      }
+    })
+    .catch(e => {
+      console.warn("[Steam RUB Converter] Failed to refresh cached rates in background:", e);
+    });
+};
+
 const scheduleInitializationRetry = () => {
   if (initializationRetryTimer !== null || isReady) return;
 
@@ -1908,14 +2013,21 @@ const initializePlugin = async () => {
 
   isInitializing = true;
 
-  try {
-    currency = await loadCachedRates();
+  const storedRates = readStoredRates();
+  if (storedRates) {
+    currency = storedRates;
     currentSettingsKey = getSettingsKey(currency);
-  } catch (e) {
-    console.error("[Steam RUB Converter] Failed to get rates from backend:", e);
-    isInitializing = false;
-    scheduleInitializationRetry();
-    return;
+    refreshCachedRatesInBackground();
+  } else {
+    try {
+      currency = await loadCachedRates();
+      currentSettingsKey = getSettingsKey(currency);
+    } catch (e) {
+      console.error("[Steam RUB Converter] Failed to get rates from backend:", e);
+      isInitializing = false;
+      scheduleInitializationRetry();
+      return;
+    }
   }
 
   isInitializing = false;
