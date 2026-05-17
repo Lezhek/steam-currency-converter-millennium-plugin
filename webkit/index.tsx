@@ -93,6 +93,8 @@ const pendingProcessElements = new Set<HTMLElement>();
 let pendingProcessTimer: number | null = null;
 const pendingDynamicBundlePriceElements = new Set<HTMLElement>();
 let pendingDynamicBundlePriceTimer: number | null = null;
+const pendingBetaMarketChartTooltips = new Set<HTMLElement>();
+let pendingBetaMarketChartTooltipFrame: number | null = null;
 
 const rateFetchTimeoutMs = 10000;
 const rateFetchRetryMs = 15000;
@@ -375,6 +377,7 @@ const storePurchaseDropdownPriceSelector = ".game_area_purchase_game_dropdown_me
 const modernStoreSaleWidgetSelector = ".StoreSalePriceWidgetContainer";
 const tagBrowsePriceSelector = ".browse_tag_game_price";
 const betaMarketRootSelector = "#CommunityTemplate";
+const betaMarketChartTooltipSelector = "#CommunityTemplate .recharts-tooltip-wrapper";
 
 const roundConvertedAmount = (amount: number, currencyCode: string): number => {
   const fractionDigits = getDisplayFractionDigits(currencyCode);
@@ -831,6 +834,101 @@ const isElementVisible = (element: HTMLElement): boolean => {
 
   const style = window.getComputedStyle(element);
   return style.display !== "none" && style.visibility !== "hidden";
+};
+
+const isBetaMarketChartTooltip = (element: HTMLElement): boolean => {
+  if (!isBetaCommunityMarketPage()) return false;
+  if (!element.closest(betaMarketRootSelector)) return false;
+  if (!element.matches(".recharts-tooltip-wrapper")) return false;
+  return isElementVisible(element);
+};
+
+const collectBetaMarketChartTooltips = (node: Node): HTMLElement[] => {
+  if (!isBetaCommunityMarketPage()) return [];
+
+  const element = node.nodeType === Node.ELEMENT_NODE ? node as HTMLElement : node.parentElement;
+  if (!element) return [];
+
+  const tooltips = new Set<HTMLElement>();
+
+  if (element.matches?.(betaMarketChartTooltipSelector) && isBetaMarketChartTooltip(element)) {
+    tooltips.add(element);
+  }
+
+  element.querySelectorAll?.(betaMarketChartTooltipSelector).forEach(candidate => {
+    if (candidate instanceof HTMLElement && isBetaMarketChartTooltip(candidate)) {
+      tooltips.add(candidate);
+    }
+  });
+
+  return Array.from(tooltips);
+};
+
+const getBetaMarketTooltipPriceLeaves = (tooltip: HTMLElement): HTMLElement[] => {
+  const leaves = new Set<HTMLElement>();
+
+  tooltip.querySelectorAll("div, span, p, li").forEach(candidate => {
+    if (!(candidate instanceof HTMLElement)) return;
+    if (candidate.classList.contains("steam-rub-chart-tooltip-price")) return;
+    if (candidate.closest(".steam-rub-chart-tooltip-price")) return;
+    if (candidate.children.length > 0) return;
+    if (!isElementVisible(candidate)) return;
+
+    const text = candidate.textContent?.trim() || "";
+    if (!text || text.length > 180) return;
+    if (textContainsConflictingCurrencyPrice(text)) return;
+    if (getSourceCurrencyPriceMatches(text).length !== 1) return;
+
+    leaves.add(candidate);
+  });
+
+  return Array.from(leaves);
+};
+
+const injectBetaMarketChartTooltipPrices = (tooltip: HTMLElement) => {
+  withObserverPaused(() => {
+    tooltip.querySelectorAll(".steam-rub-chart-tooltip-price").forEach(element => element.remove());
+  });
+
+  if (!currency || !valute || valute === getTargetCurrency()) return;
+  if (!getConversionRates()) return;
+
+  const priceLeaves = getBetaMarketTooltipPriceLeaves(tooltip);
+  if (priceLeaves.length === 0) return;
+
+  withObserverPaused(() => {
+    priceLeaves.forEach(priceLeaf => {
+      const text = priceLeaf.textContent?.trim() || "";
+      const matches = getSourceCurrencyPriceMatches(text);
+      if (matches.length !== 1) return;
+
+      const formatted = formatConvertedPrice(matches[0].price);
+      if (!formatted) return;
+
+      const row = document.createElement("div");
+      row.className = "steam-rub-price steam-rub-chart-tooltip-price";
+      row.textContent = `≈${formatted}`;
+      row.style.setProperty("color", window.getComputedStyle(priceLeaf).color, "important");
+      priceLeaf.insertAdjacentElement("afterend", row);
+    });
+  });
+};
+
+const enqueueBetaMarketChartTooltip = (tooltip: HTMLElement) => {
+  pendingBetaMarketChartTooltips.add(tooltip);
+
+  if (pendingBetaMarketChartTooltipFrame !== null) return;
+
+  pendingBetaMarketChartTooltipFrame = window.requestAnimationFrame(() => {
+    pendingBetaMarketChartTooltipFrame = null;
+    const tooltips = Array.from(pendingBetaMarketChartTooltips);
+    pendingBetaMarketChartTooltips.clear();
+    tooltips.forEach(injectBetaMarketChartTooltipPrices);
+  });
+};
+
+const processVisibleBetaMarketChartTooltips = (root: Node = document.body) => {
+  collectBetaMarketChartTooltips(root).forEach(enqueueBetaMarketChartTooltip);
 };
 
 const childContainsSourceCurrency = (element: HTMLElement): boolean => {
@@ -1666,6 +1764,10 @@ const processFullPage = () => {
     injectBetaMarketPrice(el);
   });
 
+  if (isReady) {
+    processVisibleBetaMarketChartTooltips();
+  }
+
   document.querySelectorAll(dynamicBundlePriceSelector).forEach(el => {
     if (!isReady) {
       if (!initialQueue.includes(el as HTMLElement)) initialQueue.push(el as HTMLElement);
@@ -1781,6 +1883,9 @@ const handleMutations = (mutations: MutationRecord[]) => {
     collectDynamicBundlePriceElements(mutation.target).forEach(el => {
       dynamicBundlePricesToProcess.add(el);
     });
+    if (isReady) {
+      collectBetaMarketChartTooltips(mutation.target).forEach(enqueueBetaMarketChartTooltip);
+    }
     collectModernStorePriceElements(mutation.target).forEach(el => {
       toProcess.add(el);
     });
@@ -1829,6 +1934,9 @@ const handleMutations = (mutations: MutationRecord[]) => {
         collectBetaMarketPriceElements(el).forEach(priceElement => {
           toProcess.add(priceElement);
         });
+        if (isReady) {
+          collectBetaMarketChartTooltips(el).forEach(enqueueBetaMarketChartTooltip);
+        }
 
         if (el.matches && matchesAnyTargetSelector(el)) {
           toProcess.add(el);
@@ -1853,6 +1961,15 @@ const handleMutations = (mutations: MutationRecord[]) => {
 
   dynamicBundlePricesToProcess.forEach(el => enqueueDynamicBundlePriceElement(el));
   toProcess.forEach(el => enqueueProcessElement(el));
+};
+
+const handleBetaMarketChartPointerMove = (event: Event) => {
+  if (!isReady || !isBetaCommunityMarketPage()) return;
+
+  const target = event.target instanceof Element ? event.target : null;
+  if (!target?.closest(".recharts-wrapper")) return;
+
+  processVisibleBetaMarketChartTooltips();
 };
 
 const clearStartupRetryTimer = () => {
@@ -2074,6 +2191,8 @@ const startConverter = (): boolean => {
 
   domObserver = new MutationObserver(handleMutations);
   observePriceChanges();
+  document.addEventListener("pointermove", handleBetaMarketChartPointerMove, true);
+  document.addEventListener("mousemove", handleBetaMarketChartPointerMove, true);
 
   initializePlugin();
   return true;
@@ -2178,6 +2297,17 @@ export default function WebkitMain() {
     }
     .steam-rub-beta-market-price-source {
       white-space: nowrap !important;
+    }
+    .steam-rub-chart-tooltip-price {
+      display: block !important;
+      margin-left: 0 !important;
+      margin-top: 2px !important;
+      font-size: 12px !important;
+      font-weight: 400 !important;
+      line-height: 1.2 !important;
+      opacity: 1 !important;
+      white-space: nowrap !important;
+      color: inherit !important;
     }
     .market_listing_their_price .steam-rub-market-list-price-source .steam-rub-price.is-market-price,
     .market_listing_price .steam-rub-market-list-price-source .steam-rub-price.is-market-price,
