@@ -468,6 +468,8 @@ local function on_load()
     if ok and type(hook_id_or_error) == "number" and hook_id_or_error > 0 then
         early_store_home_hook_id = hook_id_or_error
         logger:info("Early Store home converter registered")
+    elseif ok and hook_id_or_error == -1 then
+        -- Millennium can return -1 here while the browser hook is still active.
     else
         logger:warn("Early Store home converter registration failed: " .. tostring(hook_id_or_error))
     end
