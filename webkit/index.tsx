@@ -95,6 +95,8 @@ const pendingDynamicBundlePriceElements = new Set<HTMLElement>();
 let pendingDynamicBundlePriceTimer: number | null = null;
 const pendingBetaMarketChartTooltips = new Set<HTMLElement>();
 let pendingBetaMarketChartTooltipFrame: number | null = null;
+const pendingClassicMarketGraphTooltips = new Set<HTMLElement>();
+let pendingClassicMarketGraphTooltipFrame: number | null = null;
 
 const rateFetchTimeoutMs = 10000;
 const rateFetchRetryMs = 15000;
@@ -378,6 +380,10 @@ const modernStoreSaleWidgetSelector = ".StoreSalePriceWidgetContainer";
 const tagBrowsePriceSelector = ".browse_tag_game_price";
 const betaMarketRootSelector = "#CommunityTemplate";
 const betaMarketChartTooltipSelector = "#CommunityTemplate .recharts-tooltip-wrapper";
+const classicMarketGraphRootSelector = "#pricehistory.jqplot-target";
+const classicMarketGraphTooltipSelector = "#pricehistory .jqplot-highlighter-tooltip";
+const classicMarketOrderGraphRootSelector = "#orders_histogram.jqplot-target";
+const classicMarketOrderGraphTooltipSelector = "#orders_histogram .jqplot-highlighter-tooltip";
 
 const roundConvertedAmount = (amount: number, currencyCode: string): number => {
   const fractionDigits = getDisplayFractionDigits(currencyCode);
@@ -765,6 +771,18 @@ const isBetaCommunityMarketPage = (): boolean => {
   return isCommunityMarketPage() && document.querySelector(betaMarketRootSelector) !== null;
 };
 
+const isClassicMarketItemGraphPage = (): boolean => {
+  return (
+    isCommunityMarketPage() &&
+    window.location.pathname.startsWith("/market/listings/") &&
+    document.querySelector(betaMarketRootSelector) === null &&
+    (
+      document.querySelector(classicMarketGraphRootSelector) !== null ||
+      document.querySelector(classicMarketOrderGraphRootSelector) !== null
+    )
+  );
+};
+
 const isIgnoredBetaMarketPriceContext = (element: HTMLElement): boolean => {
   return !!element.closest(
     ".steam-rub-price, svg, canvas, script, style, input, textarea, select, option, template, noscript, " +
@@ -929,6 +947,137 @@ const enqueueBetaMarketChartTooltip = (tooltip: HTMLElement) => {
 
 const processVisibleBetaMarketChartTooltips = (root: Node = document.body) => {
   collectBetaMarketChartTooltips(root).forEach(enqueueBetaMarketChartTooltip);
+};
+
+const isClassicMarketGraphTooltip = (element: HTMLElement): boolean => {
+  if (!isClassicMarketItemGraphPage()) return false;
+  if (!element.matches(".jqplot-highlighter-tooltip")) return false;
+  if (
+    !element.closest(classicMarketGraphRootSelector) &&
+    !element.closest(classicMarketOrderGraphRootSelector)
+  ) return false;
+  return isElementVisible(element);
+};
+
+const collectClassicMarketGraphTooltips = (node: Node): HTMLElement[] => {
+  if (!isClassicMarketItemGraphPage()) return [];
+
+  const element = node.nodeType === Node.ELEMENT_NODE ? node as HTMLElement : node.parentElement;
+  if (!element) return [];
+
+  const tooltips = new Set<HTMLElement>();
+  const selectors = [classicMarketGraphTooltipSelector, classicMarketOrderGraphTooltipSelector];
+
+  selectors.forEach(selector => {
+    const closestTooltip = element.closest?.(selector);
+
+    if (closestTooltip instanceof HTMLElement && isClassicMarketGraphTooltip(closestTooltip)) {
+      tooltips.add(closestTooltip);
+    }
+
+    if (element.matches?.(selector) && isClassicMarketGraphTooltip(element)) {
+      tooltips.add(element);
+    }
+
+    element.querySelectorAll?.(selector).forEach(candidate => {
+      if (candidate instanceof HTMLElement && isClassicMarketGraphTooltip(candidate)) {
+        tooltips.add(candidate);
+      }
+    });
+  });
+
+  return Array.from(tooltips);
+};
+
+const getClassicMarketTooltipTextNodes = (tooltip: HTMLElement): Text[] => {
+  const nodes: Text[] = [];
+  const visit = (node: Node) => {
+    if (node.nodeType === Node.ELEMENT_NODE) {
+      const element = node as HTMLElement;
+      if (element.classList.contains("steam-rub-classic-market-graph-tooltip-price")) return;
+      if (element.closest(".steam-rub-classic-market-graph-tooltip-price")) return;
+      if (element !== tooltip && !isElementVisible(element)) return;
+    }
+
+    if (node.nodeType === Node.TEXT_NODE) {
+      const text = node.textContent?.trim() || "";
+      if (text) nodes.push(node as Text);
+      return;
+    }
+
+    node.childNodes.forEach(visit);
+  };
+
+  visit(tooltip);
+  return nodes;
+};
+
+const findClassicMarketTooltipPriceNode = (tooltip: HTMLElement): { node: Text; price: number } | null => {
+  for (const node of getClassicMarketTooltipTextNodes(tooltip)) {
+    const text = node.textContent?.trim() || "";
+    if (!text || text.length > 120) continue;
+    if (textContainsConflictingCurrencyPrice(text)) continue;
+
+    const matches = getSourceCurrencyPriceMatches(text);
+    if (matches.length !== 1) continue;
+
+    return { node, price: matches[0].price };
+  }
+
+  return null;
+};
+
+const getClassicMarketTooltipInsertionReference = (node: Text): Node => {
+  const parent = node.parentElement;
+  if (parent?.classList.contains("jqplot-highlighter-tooltip")) {
+    const next = node.nextSibling;
+    return next?.nodeName === "BR" ? next : node;
+  }
+
+  return parent || node;
+};
+
+const injectClassicMarketGraphTooltipPrice = (tooltip: HTMLElement) => {
+  withObserverPaused(() => {
+    tooltip.querySelectorAll(".steam-rub-classic-market-graph-tooltip-price").forEach(element => element.remove());
+  });
+
+  if (!currency || !valute || valute === getTargetCurrency()) return;
+  if (!getConversionRates()) return;
+
+  const source = findClassicMarketTooltipPriceNode(tooltip);
+  if (!source) return;
+
+  const formatted = formatConvertedPrice(source.price);
+  if (!formatted) return;
+
+  withObserverPaused(() => {
+    const row = document.createElement("div");
+    row.className = "steam-rub-price steam-rub-classic-market-graph-tooltip-price";
+    row.textContent = `≈${formatted}`;
+
+    const reference = getClassicMarketTooltipInsertionReference(source.node);
+    const colorElement = source.node.parentElement instanceof HTMLElement ? source.node.parentElement : tooltip;
+    row.style.setProperty("color", window.getComputedStyle(colorElement).color, "important");
+    reference.parentNode?.insertBefore(row, reference.nextSibling);
+  });
+};
+
+const enqueueClassicMarketGraphTooltip = (tooltip: HTMLElement) => {
+  pendingClassicMarketGraphTooltips.add(tooltip);
+
+  if (pendingClassicMarketGraphTooltipFrame !== null) return;
+
+  pendingClassicMarketGraphTooltipFrame = window.requestAnimationFrame(() => {
+    pendingClassicMarketGraphTooltipFrame = null;
+    const tooltips = Array.from(pendingClassicMarketGraphTooltips);
+    pendingClassicMarketGraphTooltips.clear();
+    tooltips.forEach(injectClassicMarketGraphTooltipPrice);
+  });
+};
+
+const processVisibleClassicMarketGraphTooltips = (root: Node = document.body) => {
+  collectClassicMarketGraphTooltips(root).forEach(enqueueClassicMarketGraphTooltip);
 };
 
 const childContainsSourceCurrency = (element: HTMLElement): boolean => {
@@ -1766,6 +1915,7 @@ const processFullPage = () => {
 
   if (isReady) {
     processVisibleBetaMarketChartTooltips();
+    processVisibleClassicMarketGraphTooltips();
   }
 
   document.querySelectorAll(dynamicBundlePriceSelector).forEach(el => {
@@ -1885,6 +2035,7 @@ const handleMutations = (mutations: MutationRecord[]) => {
     });
     if (isReady) {
       collectBetaMarketChartTooltips(mutation.target).forEach(enqueueBetaMarketChartTooltip);
+      collectClassicMarketGraphTooltips(mutation.target).forEach(enqueueClassicMarketGraphTooltip);
     }
     collectModernStorePriceElements(mutation.target).forEach(el => {
       toProcess.add(el);
@@ -1936,6 +2087,7 @@ const handleMutations = (mutations: MutationRecord[]) => {
         });
         if (isReady) {
           collectBetaMarketChartTooltips(el).forEach(enqueueBetaMarketChartTooltip);
+          collectClassicMarketGraphTooltips(el).forEach(enqueueClassicMarketGraphTooltip);
         }
 
         if (el.matches && matchesAnyTargetSelector(el)) {
@@ -1970,6 +2122,18 @@ const handleBetaMarketChartPointerMove = (event: Event) => {
   if (!target?.closest(".recharts-wrapper")) return;
 
   processVisibleBetaMarketChartTooltips();
+};
+
+const handleClassicMarketGraphPointerMove = (event: Event) => {
+  if (!isReady || !isClassicMarketItemGraphPage()) return;
+
+  const target = event.target instanceof Element ? event.target : null;
+  if (
+    !target?.closest(classicMarketGraphRootSelector) &&
+    !target?.closest(classicMarketOrderGraphRootSelector)
+  ) return;
+
+  processVisibleClassicMarketGraphTooltips();
 };
 
 const clearStartupRetryTimer = () => {
@@ -2193,6 +2357,8 @@ const startConverter = (): boolean => {
   observePriceChanges();
   document.addEventListener("pointermove", handleBetaMarketChartPointerMove, true);
   document.addEventListener("mousemove", handleBetaMarketChartPointerMove, true);
+  document.addEventListener("pointermove", handleClassicMarketGraphPointerMove, true);
+  document.addEventListener("mousemove", handleClassicMarketGraphPointerMove, true);
 
   initializePlugin();
   return true;
@@ -2305,6 +2471,17 @@ export default function WebkitMain() {
       font-size: 12px !important;
       font-weight: 400 !important;
       line-height: 1.2 !important;
+      opacity: 1 !important;
+      white-space: nowrap !important;
+      color: inherit !important;
+    }
+    .steam-rub-classic-market-graph-tooltip-price {
+      display: block !important;
+      margin-left: 0 !important;
+      margin-top: 0 !important;
+      font-size: inherit !important;
+      font-weight: inherit !important;
+      line-height: inherit !important;
       opacity: 1 !important;
       white-space: nowrap !important;
       color: inherit !important;
