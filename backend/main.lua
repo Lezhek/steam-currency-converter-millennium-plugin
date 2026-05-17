@@ -55,6 +55,7 @@ local cached_rates = {
 }
 
 local session_source_currency = nil
+local early_store_home_hook_id = nil
 
 local function get_plugin_dir()
     local src = debug.getinfo(1, "S").source or ""
@@ -459,6 +460,18 @@ end
 -- Plugin lifecycle
 local function on_load()
     logger:info("Steam RUB Converter backend initialized")
+    local early_store_home_path = fs.join(get_plugin_dir(), ".millennium", "Dist", "early-store-home.js"):gsub("\\", "/")
+    local ok, hook_id_or_error = pcall(function()
+        return millennium.add_browser_js(early_store_home_path, "^https://store\\.steampowered\\.com/?([?#].*)?$")
+    end)
+
+    if ok and type(hook_id_or_error) == "number" and hook_id_or_error > 0 then
+        early_store_home_hook_id = hook_id_or_error
+        logger:info("Early Store home converter registered")
+    else
+        logger:warn("Early Store home converter registration failed: " .. tostring(hook_id_or_error))
+    end
+
     millennium.ready()
 end
 
@@ -467,6 +480,12 @@ local function on_frontend_loaded()
 end
 
 local function on_unload()
+    if early_store_home_hook_id ~= nil then
+        pcall(function()
+            millennium.remove_browser_module(early_store_home_hook_id)
+        end)
+    end
+
     logger:info("Steam RUB Converter backend shutting down")
 end
 
